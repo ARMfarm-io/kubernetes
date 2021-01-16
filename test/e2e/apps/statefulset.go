@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/onsi/ginkgo"
@@ -30,7 +31,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	klabels "k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -289,7 +289,7 @@ var _ = SIGDescribe("StatefulSet", func() {
 		})
 
 		/*
-		   Release : v1.9
+		   Release: v1.9
 		   Testname: StatefulSet, Rolling Update
 		   Description: StatefulSet MUST support the RollingUpdate strategy to automatically replace Pods one at a time when the Pod template changes. The StatefulSet's status MUST indicate the CurrentRevision and UpdateRevision. If the template is changed to match a prior revision, StatefulSet MUST detect this as a rollback instead of creating a new revision. This test does not depend on a preexisting default StorageClass or a dynamic provisioner.
 		*/
@@ -300,7 +300,7 @@ var _ = SIGDescribe("StatefulSet", func() {
 		})
 
 		/*
-		   Release : v1.9
+		   Release: v1.9
 		   Testname: StatefulSet, Rolling Update with Partition
 		   Description: StatefulSet's RollingUpdate strategy MUST support the Partition parameter for canaries and phased rollouts. If a Pod is deleted while a rolling update is in progress, StatefulSet MUST restore the Pod without violating the Partition. This test does not depend on a preexisting default StorageClass or a dynamic provisioner.
 		*/
@@ -570,7 +570,7 @@ var _ = SIGDescribe("StatefulSet", func() {
 		})
 
 		/*
-		   Release : v1.9
+		   Release: v1.9
 		   Testname: StatefulSet, Scaling
 		   Description: StatefulSet MUST create Pods in ascending order by ordinal index when scaling up, and delete Pods in descending order when scaling down. Scaling up or down MUST pause if any Pods belonging to the StatefulSet are unhealthy. This test does not depend on a preexisting default StorageClass or a dynamic provisioner.
 		*/
@@ -587,6 +587,30 @@ var _ = SIGDescribe("StatefulSet", func() {
 				LabelSelector: psLabels.AsSelector().String(),
 			})
 			framework.ExpectNoError(err)
+
+			// Verify that statuful set will be scaled up in order.
+			wg := sync.WaitGroup{}
+			var orderErr error
+			wg.Add(1)
+			go func() {
+				defer ginkgo.GinkgoRecover()
+				defer wg.Done()
+
+				expectedOrder := []string{ssName + "-0", ssName + "-1", ssName + "-2"}
+				ctx, cancel := watchtools.ContextWithOptionalTimeout(context.Background(), statefulSetTimeout)
+				defer cancel()
+
+				_, orderErr = watchtools.Until(ctx, pl.ResourceVersion, w, func(event watch.Event) (bool, error) {
+					if event.Type != watch.Added {
+						return false, nil
+					}
+					pod := event.Object.(*v1.Pod)
+					if pod.Name == expectedOrder[0] {
+						expectedOrder = expectedOrder[1:]
+					}
+					return len(expectedOrder) == 0, nil
+				})
+			}()
 
 			ginkgo.By("Creating stateful set " + ssName + " in namespace " + ns)
 			ss := e2estatefulset.NewStatefulSet(ssName, ns, headlessSvcName, 1, nil, nil, psLabels)
@@ -609,27 +633,36 @@ var _ = SIGDescribe("StatefulSet", func() {
 			e2estatefulset.WaitForRunningAndReady(c, 3, ss)
 
 			ginkgo.By("Verifying that stateful set " + ssName + " was scaled up in order")
-			expectedOrder := []string{ssName + "-0", ssName + "-1", ssName + "-2"}
-			ctx, cancel := watchtools.ContextWithOptionalTimeout(context.Background(), statefulSetTimeout)
-			defer cancel()
-			_, err = watchtools.Until(ctx, pl.ResourceVersion, w, func(event watch.Event) (bool, error) {
-				if event.Type != watch.Added {
-					return false, nil
-				}
-				pod := event.Object.(*v1.Pod)
-				if pod.Name == expectedOrder[0] {
-					expectedOrder = expectedOrder[1:]
-				}
-				return len(expectedOrder) == 0, nil
-
-			})
-			framework.ExpectNoError(err)
+			wg.Wait()
+			framework.ExpectNoError(orderErr)
 
 			ginkgo.By("Scale down will halt with unhealthy stateful pod")
 			pl, err = f.ClientSet.CoreV1().Pods(ns).List(context.TODO(), metav1.ListOptions{
 				LabelSelector: psLabels.AsSelector().String(),
 			})
 			framework.ExpectNoError(err)
+
+			// Verify that statuful set will be scaled down in order.
+			wg.Add(1)
+			go func() {
+				defer ginkgo.GinkgoRecover()
+				defer wg.Done()
+
+				expectedOrder := []string{ssName + "-2", ssName + "-1", ssName + "-0"}
+				ctx, cancel := watchtools.ContextWithOptionalTimeout(context.Background(), statefulSetTimeout)
+				defer cancel()
+
+				_, orderErr = watchtools.Until(ctx, pl.ResourceVersion, w, func(event watch.Event) (bool, error) {
+					if event.Type != watch.Deleted {
+						return false, nil
+					}
+					pod := event.Object.(*v1.Pod)
+					if pod.Name == expectedOrder[0] {
+						expectedOrder = expectedOrder[1:]
+					}
+					return len(expectedOrder) == 0, nil
+				})
+			}()
 
 			breakHTTPProbe(c, ss)
 			e2estatefulset.WaitForStatusReadyReplicas(c, ss, 0)
@@ -642,25 +675,12 @@ var _ = SIGDescribe("StatefulSet", func() {
 			e2estatefulset.Scale(c, ss, 0)
 
 			ginkgo.By("Verifying that stateful set " + ssName + " was scaled down in reverse order")
-			expectedOrder = []string{ssName + "-2", ssName + "-1", ssName + "-0"}
-			ctx, cancel = watchtools.ContextWithOptionalTimeout(context.Background(), statefulSetTimeout)
-			defer cancel()
-			_, err = watchtools.Until(ctx, pl.ResourceVersion, w, func(event watch.Event) (bool, error) {
-				if event.Type != watch.Deleted {
-					return false, nil
-				}
-				pod := event.Object.(*v1.Pod)
-				if pod.Name == expectedOrder[0] {
-					expectedOrder = expectedOrder[1:]
-				}
-				return len(expectedOrder) == 0, nil
-
-			})
-			framework.ExpectNoError(err)
+			wg.Wait()
+			framework.ExpectNoError(orderErr)
 		})
 
 		/*
-		   Release : v1.9
+		   Release: v1.9
 		   Testname: StatefulSet, Burst Scaling
 		   Description: StatefulSet MUST support the Parallel PodManagementPolicy for burst scaling. This test does not depend on a preexisting default StorageClass or a dynamic provisioner.
 		*/
@@ -702,7 +722,7 @@ var _ = SIGDescribe("StatefulSet", func() {
 		})
 
 		/*
-		   Release : v1.9
+		   Release: v1.9
 		   Testname: StatefulSet, Recreate Failed Pod
 		   Description: StatefulSet MUST delete and recreate Pods it owns that go into a Failed state, such as when they are rejected or evicted by a Node. This test does not depend on a preexisting default StorageClass or a dynamic provisioner.
 		*/
@@ -748,12 +768,20 @@ var _ = SIGDescribe("StatefulSet", func() {
 
 			var initialStatefulPodUID types.UID
 			ginkgo.By("Waiting until stateful pod " + statefulPodName + " will be recreated and deleted at least once in namespace " + f.Namespace.Name)
+
 			fieldSelector := fields.OneTermEqualSelector("metadata.name", statefulPodName).String()
+			pl, err := f.ClientSet.CoreV1().Pods(ns).List(context.TODO(), metav1.ListOptions{
+				FieldSelector: fieldSelector,
+			})
+			framework.ExpectNoError(err)
+			if len(pl.Items) > 0 {
+				pod := pl.Items[0]
+				framework.Logf("Observed stateful pod in namespace: %v, name: %v, uid: %v, status phase: %v. Waiting for statefulset controller to delete.",
+					pod.Namespace, pod.Name, pod.UID, pod.Status.Phase)
+				initialStatefulPodUID = pod.UID
+			}
+
 			lw := &cache.ListWatch{
-				ListFunc: func(options metav1.ListOptions) (object runtime.Object, e error) {
-					options.FieldSelector = fieldSelector
-					return f.ClientSet.CoreV1().Pods(f.Namespace.Name).List(context.TODO(), options)
-				},
 				WatchFunc: func(options metav1.ListOptions) (i watch.Interface, e error) {
 					options.FieldSelector = fieldSelector
 					return f.ClientSet.CoreV1().Pods(f.Namespace.Name).Watch(context.TODO(), options)
@@ -762,7 +790,7 @@ var _ = SIGDescribe("StatefulSet", func() {
 			ctx, cancel := watchtools.ContextWithOptionalTimeout(context.Background(), statefulPodTimeout)
 			defer cancel()
 			// we need to get UID from pod in any state and wait until stateful set controller will remove pod at least once
-			_, err = watchtools.ListWatchUntil(ctx, lw, func(event watch.Event) (bool, error) {
+			_, err = watchtools.Until(ctx, pl.ResourceVersion, lw, func(event watch.Event) (bool, error) {
 				pod := event.Object.(*v1.Pod)
 				switch event.Type {
 				case watch.Deleted:
@@ -802,7 +830,7 @@ var _ = SIGDescribe("StatefulSet", func() {
 		})
 
 		/*
-			Release : v1.16
+			Release: v1.16
 			Testname: StatefulSet resource Replica scaling
 			Description: Create a StatefulSet resource.
 			Newly created StatefulSet resource MUST have a scale of one.
@@ -815,7 +843,7 @@ var _ = SIGDescribe("StatefulSet", func() {
 			ss, err := c.AppsV1().StatefulSets(ns).Create(context.TODO(), ss, metav1.CreateOptions{})
 			framework.ExpectNoError(err)
 			e2estatefulset.WaitForRunningAndReady(c, *ss.Spec.Replicas, ss)
-			ss = waitForStatus(c, ss)
+			waitForStatus(c, ss)
 
 			ginkgo.By("getting scale subresource")
 			scale, err := c.AppsV1().StatefulSets(ns).GetScale(context.TODO(), ssName, metav1.GetOptions{})
@@ -953,18 +981,16 @@ func (z *zookeeperTester) deploy(ns string) *appsv1.StatefulSet {
 
 func (z *zookeeperTester) write(statefulPodIndex int, kv map[string]string) {
 	name := fmt.Sprintf("%v-%d", z.ss.Name, statefulPodIndex)
-	ns := fmt.Sprintf("--namespace=%v", z.ss.Namespace)
 	for k, v := range kv {
 		cmd := fmt.Sprintf("/opt/zookeeper/bin/zkCli.sh create /%v %v", k, v)
-		framework.Logf(framework.RunKubectlOrDie(z.ss.Namespace, "exec", ns, name, "--", "/bin/sh", "-c", cmd))
+		framework.Logf(framework.RunKubectlOrDie(z.ss.Namespace, "exec", name, "--", "/bin/sh", "-c", cmd))
 	}
 }
 
 func (z *zookeeperTester) read(statefulPodIndex int, key string) string {
 	name := fmt.Sprintf("%v-%d", z.ss.Name, statefulPodIndex)
-	ns := fmt.Sprintf("--namespace=%v", z.ss.Namespace)
 	cmd := fmt.Sprintf("/opt/zookeeper/bin/zkCli.sh get /%v", key)
-	return lastLine(framework.RunKubectlOrDie(z.ss.Namespace, "exec", ns, name, "--", "/bin/sh", "-c", cmd))
+	return lastLine(framework.RunKubectlOrDie(z.ss.Namespace, "exec", name, "--", "/bin/sh", "-c", cmd))
 }
 
 type mysqlGaleraTester struct {
@@ -981,7 +1007,7 @@ func (m *mysqlGaleraTester) mysqlExec(cmd, ns, podName string) string {
 	// TODO: Find a readiness probe for mysql that guarantees writes will
 	// succeed and ditch retries. Current probe only reads, so there's a window
 	// for a race.
-	return kubectlExecWithRetries(ns, fmt.Sprintf("--namespace=%v", ns), "exec", podName, "--", "/bin/sh", "-c", cmd)
+	return kubectlExecWithRetries(ns, "exec", podName, "--", "/bin/sh", "-c", cmd)
 }
 
 func (m *mysqlGaleraTester) deploy(ns string) *appsv1.StatefulSet {
@@ -1021,7 +1047,7 @@ func (m *redisTester) name() string {
 
 func (m *redisTester) redisExec(cmd, ns, podName string) string {
 	cmd = fmt.Sprintf("/opt/redis/redis-cli -h %v %v", podName, cmd)
-	return framework.RunKubectlOrDie(ns, fmt.Sprintf("--namespace=%v", ns), "exec", podName, "--", "/bin/sh", "-c", cmd)
+	return framework.RunKubectlOrDie(ns, "exec", podName, "--", "/bin/sh", "-c", cmd)
 }
 
 func (m *redisTester) deploy(ns string) *appsv1.StatefulSet {
@@ -1052,7 +1078,7 @@ func (c *cockroachDBTester) name() string {
 
 func (c *cockroachDBTester) cockroachDBExec(cmd, ns, podName string) string {
 	cmd = fmt.Sprintf("/cockroach/cockroach sql --insecure --host %s.cockroachdb -e \"%v\"", podName, cmd)
-	return framework.RunKubectlOrDie(ns, fmt.Sprintf("--namespace=%v", ns), "exec", podName, "--", "/bin/sh", "-c", cmd)
+	return framework.RunKubectlOrDie(ns, "exec", podName, "--", "/bin/sh", "-c", cmd)
 }
 
 func (c *cockroachDBTester) deploy(ns string) *appsv1.StatefulSet {
@@ -1123,7 +1149,7 @@ func rollbackTest(c clientset.Interface, ns string, ss *appsv1.StatefulSet) {
 	e2estatefulset.SortStatefulPods(pods)
 	err = breakPodHTTPProbe(ss, &pods.Items[1])
 	framework.ExpectNoError(err)
-	ss, pods = waitForPodNotReady(c, ss, pods.Items[1].Name)
+	ss, _ = waitForPodNotReady(c, ss, pods.Items[1].Name)
 	newImage := NewWebserverImage
 	oldImage := ss.Spec.Template.Spec.Containers[0].Image
 
@@ -1144,7 +1170,7 @@ func rollbackTest(c clientset.Interface, ns string, ss *appsv1.StatefulSet) {
 	e2estatefulset.SortStatefulPods(pods)
 	err = restorePodHTTPProbe(ss, &pods.Items[1])
 	framework.ExpectNoError(err)
-	ss, pods = e2estatefulset.WaitForPodReady(c, ss, pods.Items[1].Name)
+	ss, _ = e2estatefulset.WaitForPodReady(c, ss, pods.Items[1].Name)
 	ss, pods = waitForRollingUpdate(c, ss)
 	framework.ExpectEqual(ss.Status.CurrentRevision, updateRevision, fmt.Sprintf("StatefulSet %s/%s current revision %s does not equal update revision %s on update completion",
 		ss.Namespace,
@@ -1167,9 +1193,8 @@ func rollbackTest(c clientset.Interface, ns string, ss *appsv1.StatefulSet) {
 	ginkgo.By("Rolling back to a previous revision")
 	err = breakPodHTTPProbe(ss, &pods.Items[1])
 	framework.ExpectNoError(err)
-	ss, pods = waitForPodNotReady(c, ss, pods.Items[1].Name)
+	ss, _ = waitForPodNotReady(c, ss, pods.Items[1].Name)
 	priorRevision := currentRevision
-	currentRevision, updateRevision = ss.Status.CurrentRevision, ss.Status.UpdateRevision
 	ss, err = updateStatefulSetWithRetries(c, ns, ss.Name, func(update *appsv1.StatefulSet) {
 		update.Spec.Template.Spec.Containers[0].Image = oldImage
 	})
@@ -1183,7 +1208,7 @@ func rollbackTest(c clientset.Interface, ns string, ss *appsv1.StatefulSet) {
 	pods = e2estatefulset.GetPodList(c, ss)
 	e2estatefulset.SortStatefulPods(pods)
 	restorePodHTTPProbe(ss, &pods.Items[1])
-	ss, pods = e2estatefulset.WaitForPodReady(c, ss, pods.Items[1].Name)
+	ss, _ = e2estatefulset.WaitForPodReady(c, ss, pods.Items[1].Name)
 	ss, pods = waitForRollingUpdate(c, ss)
 	framework.ExpectEqual(ss.Status.CurrentRevision, priorRevision, fmt.Sprintf("StatefulSet %s/%s current revision %s does not equal prior revision %s on rollback completion",
 		ss.Namespace,
@@ -1292,7 +1317,7 @@ func deleteStatefulPodAtIndex(c clientset.Interface, index int, ss *appsv1.State
 	}
 }
 
-// getStatefulSetPodNameAtIndex gets formated pod name given index.
+// getStatefulSetPodNameAtIndex gets formatted pod name given index.
 func getStatefulSetPodNameAtIndex(index int, ss *appsv1.StatefulSet) string {
 	// TODO: we won't use "-index" as the name strategy forever,
 	// pull the name out from an identity mapper.

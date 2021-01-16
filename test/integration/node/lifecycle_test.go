@@ -131,10 +131,9 @@ func TestTaintBasedEvictions(t *testing.T) {
 			podTolerations.SetExternalKubeClientSet(externalClientset)
 			podTolerations.SetExternalKubeInformerFactory(externalInformers)
 
-			testCtx = testutils.InitTestScheduler(t, testCtx, true, nil)
+			testCtx = testutils.InitTestScheduler(t, testCtx, nil)
 			defer testutils.CleanupTest(t, testCtx)
 			cs := testCtx.ClientSet
-			informers := testCtx.InformerFactory
 			_, err := cs.CoreV1().Namespaces().Create(context.TODO(), testCtx.NS, metav1.CreateOptions{})
 			if err != nil {
 				t.Errorf("Failed to create namespace %+v", err)
@@ -142,10 +141,10 @@ func TestTaintBasedEvictions(t *testing.T) {
 
 			// Start NodeLifecycleController for taint.
 			nc, err := nodelifecycle.NewNodeLifecycleController(
-				informers.Coordination().V1().Leases(),
-				informers.Core().V1().Pods(),
-				informers.Core().V1().Nodes(),
-				informers.Apps().V1().DaemonSets(),
+				externalInformers.Coordination().V1().Leases(),
+				externalInformers.Core().V1().Pods(),
+				externalInformers.Core().V1().Nodes(),
+				externalInformers.Apps().V1().DaemonSets(),
 				cs,
 				5*time.Second,    // Node monitor grace period
 				time.Minute,      // Node startup grace period
@@ -162,13 +161,14 @@ func TestTaintBasedEvictions(t *testing.T) {
 				return
 			}
 
-			go nc.Run(testCtx.Ctx.Done())
-
-			// Waiting for all controller sync.
+			// Waiting for all controllers to sync
 			externalInformers.Start(testCtx.Ctx.Done())
 			externalInformers.WaitForCacheSync(testCtx.Ctx.Done())
-			informers.Start(testCtx.Ctx.Done())
-			informers.WaitForCacheSync(testCtx.Ctx.Done())
+			testutils.SyncInformerFactory(testCtx)
+
+			// Run all controllers
+			go nc.Run(testCtx.Ctx.Done())
+			go testCtx.Scheduler.Run(testCtx.Ctx)
 
 			nodeRes := v1.ResourceList{
 				v1.ResourceCPU:    resource.MustParse("4000m"),
@@ -181,7 +181,7 @@ func TestTaintBasedEvictions(t *testing.T) {
 				nodes = append(nodes, &v1.Node{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:   fmt.Sprintf("node-%d", i),
-						Labels: map[string]string{v1.LabelZoneRegion: "region1", v1.LabelZoneFailureDomain: "zone1"},
+						Labels: map[string]string{v1.LabelTopologyRegion: "region1", v1.LabelTopologyZone: "zone1"},
 					},
 					Spec: v1.NodeSpec{},
 					Status: v1.NodeStatus{

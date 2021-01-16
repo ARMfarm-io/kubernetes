@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -288,8 +288,8 @@ func (c *NamingConditionController) Run(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 	defer c.queue.ShutDown()
 
-	klog.Infof("Starting NamingConditionController")
-	defer klog.Infof("Shutting down NamingConditionController")
+	klog.Info("Starting NamingConditionController")
+	defer klog.Info("Shutting down NamingConditionController")
 
 	if !cache.WaitForCacheSync(stopCh, c.crdSynced) {
 		return

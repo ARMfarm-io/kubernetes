@@ -179,6 +179,8 @@ func TestDescribePodTolerations(t *testing.T) {
 		},
 		Spec: corev1.PodSpec{
 			Tolerations: []corev1.Toleration{
+				{Operator: corev1.TolerationOpExists},
+				{Effect: corev1.TaintEffectNoSchedule, Operator: corev1.TolerationOpExists},
 				{Key: "key0", Operator: corev1.TolerationOpExists},
 				{Key: "key1", Value: "value1"},
 				{Key: "key2", Operator: corev1.TolerationOpEqual, Value: "value2", Effect: corev1.TaintEffectNoSchedule},
@@ -193,7 +195,9 @@ func TestDescribePodTolerations(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	if !strings.Contains(out, "key0\n") ||
+	if !strings.Contains(out, "  op=Exists\n") ||
+		!strings.Contains(out, ":NoSchedule op=Exists\n") ||
+		!strings.Contains(out, "key0 op=Exists\n") ||
 		!strings.Contains(out, "key1=value1\n") ||
 		!strings.Contains(out, "key2=value2:NoSchedule\n") ||
 		!strings.Contains(out, "key3=value3:NoExecute for 300s\n") ||
@@ -354,8 +358,7 @@ func getResourceList(cpu, memory string) corev1.ResourceList {
 }
 
 func TestDescribeService(t *testing.T) {
-	defaultServiceIPFamily := corev1.IPv4Protocol
-
+	singleStack := corev1.IPFamilyPolicySingleStack
 	testCases := []struct {
 		name    string
 		service *corev1.Service
@@ -369,8 +372,7 @@ func TestDescribeService(t *testing.T) {
 					Namespace: "foo",
 				},
 				Spec: corev1.ServiceSpec{
-					Type:     corev1.ServiceTypeLoadBalancer,
-					IPFamily: &defaultServiceIPFamily,
+					Type: corev1.ServiceTypeLoadBalancer,
 					Ports: []corev1.ServicePort{{
 						Name:       "port-tcp",
 						Port:       8080,
@@ -380,6 +382,7 @@ func TestDescribeService(t *testing.T) {
 					}},
 					Selector:              map[string]string{"blah": "heh"},
 					ClusterIP:             "1.2.3.4",
+					IPFamilies:            []corev1.IPFamily{corev1.IPv4Protocol},
 					LoadBalancerIP:        "5.6.7.8",
 					SessionAffinity:       "None",
 					ExternalTrafficPolicy: "Local",
@@ -408,8 +411,7 @@ func TestDescribeService(t *testing.T) {
 					Namespace: "foo",
 				},
 				Spec: corev1.ServiceSpec{
-					Type:     corev1.ServiceTypeLoadBalancer,
-					IPFamily: &defaultServiceIPFamily,
+					Type: corev1.ServiceTypeLoadBalancer,
 					Ports: []corev1.ServicePort{{
 						Name:       "port-tcp",
 						Port:       8080,
@@ -419,6 +421,7 @@ func TestDescribeService(t *testing.T) {
 					}},
 					Selector:              map[string]string{"blah": "heh"},
 					ClusterIP:             "1.2.3.4",
+					IPFamilies:            []corev1.IPFamily{corev1.IPv4Protocol},
 					LoadBalancerIP:        "5.6.7.8",
 					SessionAffinity:       "None",
 					ExternalTrafficPolicy: "Local",
@@ -447,8 +450,7 @@ func TestDescribeService(t *testing.T) {
 					Namespace: "foo",
 				},
 				Spec: corev1.ServiceSpec{
-					Type:     corev1.ServiceTypeLoadBalancer,
-					IPFamily: &defaultServiceIPFamily,
+					Type: corev1.ServiceTypeLoadBalancer,
 					Ports: []corev1.ServicePort{{
 						Name:       "port-tcp",
 						Port:       8080,
@@ -458,6 +460,7 @@ func TestDescribeService(t *testing.T) {
 					}},
 					Selector:              map[string]string{"blah": "heh"},
 					ClusterIP:             "1.2.3.4",
+					IPFamilies:            []corev1.IPFamily{corev1.IPv4Protocol},
 					LoadBalancerIP:        "5.6.7.8",
 					SessionAffinity:       "None",
 					ExternalTrafficPolicy: "Local",
@@ -470,7 +473,51 @@ func TestDescribeService(t *testing.T) {
 				"Selector", "blah=heh",
 				"Type", "LoadBalancer",
 				"IP", "1.2.3.4",
-				"IPFamily", "IPv4",
+				"IP Families", "IPv4",
+				"Port", "port-tcp", "8080/TCP",
+				"TargetPort", "targetPort/TCP",
+				"NodePort", "port-tcp", "31111/TCP",
+				"Session Affinity", "None",
+				"External Traffic Policy", "Local",
+				"HealthCheck NodePort", "32222",
+			},
+		},
+		{
+			name: "test-ServiceIPFamilyPolicy+ClusterIPs",
+			service: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+				},
+				Spec: corev1.ServiceSpec{
+					Type: corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{
+						Name:       "port-tcp",
+						Port:       8080,
+						Protocol:   corev1.ProtocolTCP,
+						TargetPort: intstr.FromString("targetPort"),
+						NodePort:   31111,
+					}},
+					Selector:              map[string]string{"blah": "heh"},
+					ClusterIP:             "1.2.3.4",
+					IPFamilies:            []corev1.IPFamily{corev1.IPv4Protocol},
+					IPFamilyPolicy:        &singleStack,
+					ClusterIPs:            []string{"1.2.3.4"},
+					LoadBalancerIP:        "5.6.7.8",
+					SessionAffinity:       "None",
+					ExternalTrafficPolicy: "Local",
+					HealthCheckNodePort:   32222,
+				},
+			},
+			expect: []string{
+				"Name", "bar",
+				"Namespace", "foo",
+				"Selector", "blah=heh",
+				"Type", "LoadBalancer",
+				"IP", "1.2.3.4",
+				"IP Families", "IPv4",
+				"IP Family Policy", "SingleStack",
+				"IPs", "1.2.3.4",
 				"Port", "port-tcp", "8080/TCP",
 				"TargetPort", "targetPort/TCP",
 				"NodePort", "port-tcp", "31111/TCP",
@@ -1597,7 +1644,7 @@ func TestPersistentVolumeClaimDescriber(t *testing.T) {
 				},
 				Status: corev1.PersistentVolumeClaimStatus{},
 			},
-			expectedElements: []string{"\nDataSource:\n  Kind:      PersistentVolumeClaim\n  Name:      srcpvc"},
+			expectedElements: []string{"\nDataSource:\n  Kind:   PersistentVolumeClaim\n  Name:   srcpvc"},
 		},
 		{
 			name: "snapshot-datasource",
@@ -1675,12 +1722,11 @@ func TestDescribeDeployment(t *testing.T) {
 }
 
 func TestDescribeIngress(t *testing.T) {
-	defaultBackend := networkingv1beta1.IngressBackend{
+	backendV1beta1 := networkingv1beta1.IngressBackend{
 		ServiceName: "default-backend",
 		ServicePort: intstr.FromInt(80),
 	}
-
-	fakeClient := fake.NewSimpleClientset(&networkingv1beta1.Ingress{
+	v1beta1 := fake.NewSimpleClientset(&networkingv1beta1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "bar",
 			Namespace: "foo",
@@ -1692,6 +1738,300 @@ func TestDescribeIngress(t *testing.T) {
 					IngressRuleValue: networkingv1beta1.IngressRuleValue{
 						HTTP: &networkingv1beta1.HTTPIngressRuleValue{
 							Paths: []networkingv1beta1.HTTPIngressPath{
+								{
+									Path:    "/foo",
+									Backend: backendV1beta1,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	backendV1 := networkingv1.IngressBackend{
+		Service: &networkingv1.IngressServiceBackend{
+			Name: "default-backend",
+			Port: networkingv1.ServiceBackendPort{
+				Number: 80,
+			},
+		},
+	}
+
+	netv1 := fake.NewSimpleClientset(&networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bar",
+			Namespace: "foo",
+		},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{
+				{
+					Host: "foo.bar.com",
+					IngressRuleValue: networkingv1.IngressRuleValue{
+						HTTP: &networkingv1.HTTPIngressRuleValue{
+							Paths: []networkingv1.HTTPIngressPath{
+								{
+									Path:    "/foo",
+									Backend: backendV1,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	backendResource := networkingv1.IngressBackend{
+		Resource: &corev1.TypedLocalObjectReference{
+			APIGroup: utilpointer.StringPtr("example.com"),
+			Kind:     "foo",
+			Name:     "bar",
+		},
+	}
+
+	tests := map[string]struct {
+		input  *fake.Clientset
+		output string
+	}{
+		"IngressRule.HTTP.Paths.Backend.Service v1beta1": {
+			input: v1beta1,
+			output: `Name:             bar
+Namespace:        foo
+Address:          
+Default backend:  default-http-backend:80 (<error: endpoints "default-http-backend" not found>)
+Rules:
+  Host         Path  Backends
+  ----         ----  --------
+  foo.bar.com  
+               /foo   default-backend:80 (<error: endpoints "default-backend" not found>)
+Annotations:   <none>
+Events:        <none>` + "\n",
+		},
+		"IngressRule.HTTP.Paths.Backend.Service v1": {
+			input: netv1,
+			output: `Name:             bar
+Namespace:        foo
+Address:          
+Default backend:  default-http-backend:80 (<error: endpoints "default-http-backend" not found>)
+Rules:
+  Host         Path  Backends
+  ----         ----  --------
+  foo.bar.com  
+               /foo   default-backend:80 (<error: endpoints "default-backend" not found>)
+Annotations:   <none>
+Events:        <none>` + "\n",
+		},
+		"IngressRule.HTTP.Paths.Backend.Resource v1": {
+			input: fake.NewSimpleClientset(&networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+				},
+				Spec: networkingv1.IngressSpec{
+					Rules: []networkingv1.IngressRule{
+						{
+							Host: "foo.bar.com",
+							IngressRuleValue: networkingv1.IngressRuleValue{
+								HTTP: &networkingv1.HTTPIngressRuleValue{
+									Paths: []networkingv1.HTTPIngressPath{
+										{
+											Path:    "/foo",
+											Backend: backendResource,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}),
+			output: `Name:             bar
+Namespace:        foo
+Address:          
+Default backend:  default-http-backend:80 (<error: endpoints "default-http-backend" not found>)
+Rules:
+  Host         Path  Backends
+  ----         ----  --------
+  foo.bar.com  
+               /foo   APIGroup: example.com, Kind: foo, Name: bar
+Annotations:   <none>
+Events:        <none>` + "\n",
+		},
+		"Spec.DefaultBackend.Service & IngressRule.HTTP.Paths.Backend.Service v1": {
+			input: fake.NewSimpleClientset(&networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+				},
+				Spec: networkingv1.IngressSpec{
+					DefaultBackend: &backendV1,
+					Rules: []networkingv1.IngressRule{
+						{
+							Host: "foo.bar.com",
+							IngressRuleValue: networkingv1.IngressRuleValue{
+								HTTP: &networkingv1.HTTPIngressRuleValue{
+									Paths: []networkingv1.HTTPIngressPath{
+										{
+											Path:    "/foo",
+											Backend: backendV1,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}),
+			output: `Name:             bar
+Namespace:        foo
+Address:          
+Default backend:  default-backend:80 (<error: endpoints "default-backend" not found>)
+Rules:
+  Host         Path  Backends
+  ----         ----  --------
+  foo.bar.com  
+               /foo   default-backend:80 (<error: endpoints "default-backend" not found>)
+Annotations:   <none>
+Events:        <none>` + "\n",
+		},
+		"Spec.DefaultBackend.Resource & IngressRule.HTTP.Paths.Backend.Resource v1": {
+			input: fake.NewSimpleClientset(&networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+				},
+				Spec: networkingv1.IngressSpec{
+					DefaultBackend: &backendResource,
+					Rules: []networkingv1.IngressRule{
+						{
+							Host: "foo.bar.com",
+							IngressRuleValue: networkingv1.IngressRuleValue{
+								HTTP: &networkingv1.HTTPIngressRuleValue{
+									Paths: []networkingv1.HTTPIngressPath{
+										{
+											Path:    "/foo",
+											Backend: backendResource,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}),
+			output: `Name:             bar
+Namespace:        foo
+Address:          
+Default backend:  APIGroup: example.com, Kind: foo, Name: bar
+Rules:
+  Host         Path  Backends
+  ----         ----  --------
+  foo.bar.com  
+               /foo   APIGroup: example.com, Kind: foo, Name: bar
+Annotations:   <none>
+Events:        <none>` + "\n",
+		},
+		"Spec.DefaultBackend.Resource & IngressRule.HTTP.Paths.Backend.Service v1": {
+			input: fake.NewSimpleClientset(&networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+				},
+				Spec: networkingv1.IngressSpec{
+					DefaultBackend: &backendResource,
+					Rules: []networkingv1.IngressRule{
+						{
+							Host: "foo.bar.com",
+							IngressRuleValue: networkingv1.IngressRuleValue{
+								HTTP: &networkingv1.HTTPIngressRuleValue{
+									Paths: []networkingv1.HTTPIngressPath{
+										{
+											Path:    "/foo",
+											Backend: backendV1,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}),
+			output: `Name:             bar
+Namespace:        foo
+Address:          
+Default backend:  APIGroup: example.com, Kind: foo, Name: bar
+Rules:
+  Host         Path  Backends
+  ----         ----  --------
+  foo.bar.com  
+               /foo   default-backend:80 (<error: endpoints "default-backend" not found>)
+Annotations:   <none>
+Events:        <none>` + "\n",
+		},
+		"DefaultBackend": {
+			input: fake.NewSimpleClientset(&networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+				},
+				Spec: networkingv1.IngressSpec{
+					DefaultBackend: &backendV1,
+				},
+			}),
+			output: `Name:             bar
+Namespace:        foo
+Address:          
+Default backend:  default-backend:80 (<error: endpoints "default-backend" not found>)
+Rules:
+  Host        Path  Backends
+  ----        ----  --------
+  *           *     default-backend:80 (<error: endpoints "default-backend" not found>)
+Annotations:  <none>
+Events:       <none>
+`,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			c := &describeClient{T: t, Namespace: "foo", Interface: test.input}
+			i := IngressDescriber{c}
+			out, err := i.Describe("foo", "bar", DescriberSettings{ShowEvents: true})
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if out != test.output {
+				t.Logf(out)
+				t.Logf(test.output)
+				t.Errorf("expected: \n%q\n but got output: \n%q\n", test.output, out)
+			}
+		})
+	}
+}
+
+func TestDescribeIngressV1(t *testing.T) {
+	defaultBackend := networkingv1.IngressBackend{
+		Service: &networkingv1.IngressServiceBackend{
+			Name: "default-backend",
+			Port: networkingv1.ServiceBackendPort{
+				Number: 80,
+			},
+		},
+	}
+
+	fakeClient := fake.NewSimpleClientset(&networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bar",
+			Namespace: "foo",
+		},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{
+				{
+					Host: "foo.bar.com",
+					IngressRuleValue: networkingv1.IngressRuleValue{
+						HTTP: &networkingv1.HTTPIngressRuleValue{
+							Paths: []networkingv1.HTTPIngressPath{
 								{
 									Path:    "/foo",
 									Backend: defaultBackend,
@@ -2415,6 +2755,152 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 			},
 		},
 		{
+			"container resource source type, target average value (no current)",
+			autoscalingv2beta2.HorizontalPodAutoscaler{
+				Spec: autoscalingv2beta2.HorizontalPodAutoscalerSpec{
+					ScaleTargetRef: autoscalingv2beta2.CrossVersionObjectReference{
+						Name: "some-rc",
+						Kind: "ReplicationController",
+					},
+					MinReplicas: &minReplicasVal,
+					MaxReplicas: 10,
+					Metrics: []autoscalingv2beta2.MetricSpec{
+						{
+							Type: autoscalingv2beta2.ContainerResourceMetricSourceType,
+							ContainerResource: &autoscalingv2beta2.ContainerResourceMetricSource{
+								Name:      corev1.ResourceCPU,
+								Container: "application",
+								Target: autoscalingv2beta2.MetricTarget{
+									Type:         autoscalingv2beta2.AverageValueMetricType,
+									AverageValue: resource.NewMilliQuantity(100, resource.DecimalSI),
+								},
+							},
+						},
+					},
+				},
+				Status: autoscalingv2beta2.HorizontalPodAutoscalerStatus{
+					CurrentReplicas: 4,
+					DesiredReplicas: 5,
+				},
+			},
+		},
+		{
+			"container resource source type, target average value (with current)",
+			autoscalingv2beta2.HorizontalPodAutoscaler{
+				Spec: autoscalingv2beta2.HorizontalPodAutoscalerSpec{
+					ScaleTargetRef: autoscalingv2beta2.CrossVersionObjectReference{
+						Name: "some-rc",
+						Kind: "ReplicationController",
+					},
+					MinReplicas: &minReplicasVal,
+					MaxReplicas: 10,
+					Metrics: []autoscalingv2beta2.MetricSpec{
+						{
+							Type: autoscalingv2beta2.ContainerResourceMetricSourceType,
+							ContainerResource: &autoscalingv2beta2.ContainerResourceMetricSource{
+								Name:      corev1.ResourceCPU,
+								Container: "application",
+								Target: autoscalingv2beta2.MetricTarget{
+									Type:         autoscalingv2beta2.AverageValueMetricType,
+									AverageValue: resource.NewMilliQuantity(100, resource.DecimalSI),
+								},
+							},
+						},
+					},
+				},
+				Status: autoscalingv2beta2.HorizontalPodAutoscalerStatus{
+					CurrentReplicas: 4,
+					DesiredReplicas: 5,
+					CurrentMetrics: []autoscalingv2beta2.MetricStatus{
+						{
+							Type: autoscalingv2beta2.ContainerResourceMetricSourceType,
+							ContainerResource: &autoscalingv2beta2.ContainerResourceMetricStatus{
+								Name:      corev1.ResourceCPU,
+								Container: "application",
+								Current: autoscalingv2beta2.MetricValueStatus{
+									AverageValue: resource.NewMilliQuantity(50, resource.DecimalSI),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			"container resource source type, target utilization (no current)",
+			autoscalingv2beta2.HorizontalPodAutoscaler{
+				Spec: autoscalingv2beta2.HorizontalPodAutoscalerSpec{
+					ScaleTargetRef: autoscalingv2beta2.CrossVersionObjectReference{
+						Name: "some-rc",
+						Kind: "ReplicationController",
+					},
+					MinReplicas: &minReplicasVal,
+					MaxReplicas: 10,
+					Metrics: []autoscalingv2beta2.MetricSpec{
+						{
+							Type: autoscalingv2beta2.ContainerResourceMetricSourceType,
+							ContainerResource: &autoscalingv2beta2.ContainerResourceMetricSource{
+								Name:      corev1.ResourceCPU,
+								Container: "application",
+								Target: autoscalingv2beta2.MetricTarget{
+									Type:               autoscalingv2beta2.UtilizationMetricType,
+									AverageUtilization: &targetUtilizationVal,
+								},
+							},
+						},
+					},
+				},
+				Status: autoscalingv2beta2.HorizontalPodAutoscalerStatus{
+					CurrentReplicas: 4,
+					DesiredReplicas: 5,
+				},
+			},
+		},
+		{
+			"container resource source type, target utilization (with current)",
+			autoscalingv2beta2.HorizontalPodAutoscaler{
+				Spec: autoscalingv2beta2.HorizontalPodAutoscalerSpec{
+					ScaleTargetRef: autoscalingv2beta2.CrossVersionObjectReference{
+						Name: "some-rc",
+						Kind: "ReplicationController",
+					},
+					MinReplicas: &minReplicasVal,
+					MaxReplicas: 10,
+					Metrics: []autoscalingv2beta2.MetricSpec{
+						{
+							Type: autoscalingv2beta2.ContainerResourceMetricSourceType,
+							ContainerResource: &autoscalingv2beta2.ContainerResourceMetricSource{
+								Name:      corev1.ResourceCPU,
+								Container: "application",
+								Target: autoscalingv2beta2.MetricTarget{
+									Type:               autoscalingv2beta2.UtilizationMetricType,
+									AverageUtilization: &targetUtilizationVal,
+								},
+							},
+						},
+					},
+				},
+				Status: autoscalingv2beta2.HorizontalPodAutoscalerStatus{
+					CurrentReplicas: 4,
+					DesiredReplicas: 5,
+					CurrentMetrics: []autoscalingv2beta2.MetricStatus{
+						{
+							Type: autoscalingv2beta2.ContainerResourceMetricSourceType,
+							ContainerResource: &autoscalingv2beta2.ContainerResourceMetricStatus{
+								Name:      corev1.ResourceCPU,
+								Container: "application",
+								Current: autoscalingv2beta2.MetricValueStatus{
+									AverageUtilization: &currentUtilizationVal,
+									AverageValue:       resource.NewMilliQuantity(40, resource.DecimalSI),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+
+		{
 			"multiple metrics",
 			autoscalingv2beta2.HorizontalPodAutoscaler{
 				Spec: autoscalingv2beta2.HorizontalPodAutoscalerSpec{
@@ -3095,27 +3581,6 @@ func TestDescribeResourceQuota(t *testing.T) {
 }
 
 func TestDescribeIngressClass(t *testing.T) {
-	fake := fake.NewSimpleClientset(&networkingv1beta1.IngressClass{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "example-class",
-		},
-		Spec: networkingv1beta1.IngressClassSpec{
-			Controller: "example.com/controller",
-			Parameters: &corev1.TypedLocalObjectReference{
-				APIGroup: utilpointer.StringPtr("v1"),
-				Kind:     "ConfigMap",
-				Name:     "example-parameters",
-			},
-		},
-	})
-
-	c := &describeClient{T: t, Namespace: "foo", Interface: fake}
-	d := IngressClassDescriber{c}
-	out, err := d.Describe("", "example-class", DescriberSettings{})
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-
 	expectedOut := `Name:         example-class
 Labels:       <none>
 Annotations:  <none>
@@ -3125,9 +3590,57 @@ Parameters:
   Kind:      ConfigMap
   Name:      example-parameters` + "\n"
 
-	if out != expectedOut {
-		t.Logf(out)
-		t.Errorf("expected : %q\n but got output:\n %q", expectedOut, out)
+	tests := map[string]struct {
+		input  *fake.Clientset
+		output string
+	}{
+		"basic IngressClass (v1beta1)": {
+			input: fake.NewSimpleClientset(&networkingv1beta1.IngressClass{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "example-class",
+				},
+				Spec: networkingv1beta1.IngressClassSpec{
+					Controller: "example.com/controller",
+					Parameters: &corev1.TypedLocalObjectReference{
+						APIGroup: utilpointer.StringPtr("v1"),
+						Kind:     "ConfigMap",
+						Name:     "example-parameters",
+					},
+				},
+			}),
+			output: expectedOut,
+		},
+		"basic IngressClass (v1)": {
+			input: fake.NewSimpleClientset(&networkingv1.IngressClass{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "example-class",
+				},
+				Spec: networkingv1.IngressClassSpec{
+					Controller: "example.com/controller",
+					Parameters: &corev1.TypedLocalObjectReference{
+						APIGroup: utilpointer.StringPtr("v1"),
+						Kind:     "ConfigMap",
+						Name:     "example-parameters",
+					},
+				},
+			}),
+			output: expectedOut,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			c := &describeClient{T: t, Namespace: "foo", Interface: test.input}
+			d := IngressClassDescriber{c}
+			out, err := d.Describe("", "example-class", DescriberSettings{})
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if out != expectedOut {
+				t.Logf(out)
+				t.Errorf("expected : %q\n but got output:\n %q", test.output, out)
+			}
+		})
 	}
 }
 
@@ -3180,7 +3693,7 @@ Spec:
         Except: 192.168.3.0/24, 192.168.4.0/24
     ----------
     To Port: <any> (traffic allowed to all ports)
-    To: <any> (traffic not restricted by source)
+    To: <any> (traffic not restricted by destination)
   Policy Types: Ingress, Egress
 `
 

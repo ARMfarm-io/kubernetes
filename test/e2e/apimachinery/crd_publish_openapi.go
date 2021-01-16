@@ -28,7 +28,10 @@ import (
 
 	"github.com/go-openapi/spec"
 	"github.com/onsi/ginkgo"
+	openapiutil "k8s.io/kube-openapi/pkg/util"
+	kubeopenapispec "k8s.io/kube-openapi/pkg/validation/spec"
 	"k8s.io/utils/pointer"
+	"sigs.k8s.io/yaml"
 
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -39,10 +42,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	k8sclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	openapiutil "k8s.io/kube-openapi/pkg/util"
 	"k8s.io/kubernetes/test/e2e/framework"
 	"k8s.io/kubernetes/test/utils/crd"
-	"sigs.k8s.io/yaml"
 )
 
 var (
@@ -64,12 +65,6 @@ var _ = SIGDescribe("CustomResourcePublishOpenAPI [Privileged:ClusterAdmin]", fu
 	*/
 	framework.ConformanceIt("works for CRD with validation schema", func() {
 		crd, err := setupCRD(f, schemaFoo, "foo", "v1")
-		if err != nil {
-			framework.Failf("%v", err)
-		}
-
-		customServiceShortName := "ksvc"
-		crdSvc, err := setupCRDWithShortName(f, schemaCustomService, "service", customServiceShortName, "v1alpha1")
 		if err != nil {
 			framework.Failf("%v", err)
 		}
@@ -126,20 +121,12 @@ var _ = SIGDescribe("CustomResourcePublishOpenAPI [Privileged:ClusterAdmin]", fu
 			framework.Failf("%v", err)
 		}
 
-		ginkgo.By("kubectl explain works for CR with the same resource name as built-in object")
-		if err := verifyKubectlExplain(f.Namespace.Name, customServiceShortName+".spec", `(?s)DESCRIPTION:.*Specification of CustomService.*FIELDS:.*dummy.*<string>.*Dummy property`); err != nil {
-			framework.Failf("%v", err)
-		}
-
 		ginkgo.By("kubectl explain works to return error when explain is called on property that doesn't exist")
 		if _, err := framework.RunKubectl(f.Namespace.Name, "explain", crd.Crd.Spec.Names.Plural+".spec.bars2"); err == nil || !strings.Contains(err.Error(), `field "bars2" does not exist`) {
 			framework.Failf("unexpected no error when explaining property that doesn't exist: %v", err)
 		}
 
 		if err := cleanupCRD(f, crd); err != nil {
-			framework.Failf("%v", err)
-		}
-		if err := cleanupCRD(f, crdSvc); err != nil {
 			framework.Failf("%v", err)
 		}
 	})
@@ -244,7 +231,7 @@ var _ = SIGDescribe("CustomResourcePublishOpenAPI [Privileged:ClusterAdmin]", fu
 		ns := fmt.Sprintf("--namespace=%v", f.Namespace.Name)
 
 		ginkgo.By("client-side validation (kubectl create and apply) allows request with any unknown properties")
-		randomCR := fmt.Sprintf(`{%s,"spec":{"b":[{"c":"d"}]}}`, meta)
+		randomCR := fmt.Sprintf(`{%s,"spec":{"a":null,"b":[{"c":"d"}]}}`, meta)
 		if _, err := framework.RunKubectlInput(f.Namespace.Name, randomCR, ns, "create", "-f", "-"); err != nil {
 			framework.Failf("failed to create random CR %s for CRD that allows unknown properties in a nested object: %v", randomCR, err)
 		}
@@ -478,6 +465,34 @@ var _ = SIGDescribe("CustomResourcePublishOpenAPI [Privileged:ClusterAdmin]", fu
 			framework.Failf("%v", err)
 		}
 	})
+
+	// Marked as flaky until https://github.com/kubernetes/kubernetes/issues/65517 is solved.
+	ginkgo.It("[Flaky] kubectl explain works for CR with the same resource name as built-in object.", func() {
+		customServiceShortName := fmt.Sprintf("ksvc-%d", time.Now().Unix()) // make short name unique
+		opt := func(crd *apiextensionsv1.CustomResourceDefinition) {
+			crd.ObjectMeta = metav1.ObjectMeta{Name: "services." + crd.Spec.Group}
+			crd.Spec.Names = apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:     "services",
+				Singular:   "service",
+				ListKind:   "ServiceList",
+				Kind:       "Service",
+				ShortNames: []string{customServiceShortName},
+			}
+		}
+		crdSvc, err := setupCRDAndVerifySchemaWithOptions(f, schemaCustomService, schemaCustomService, "service", []string{"v1"}, opt)
+		if err != nil {
+			framework.Failf("%v", err)
+		}
+
+		if err := verifyKubectlExplain(f.Namespace.Name, customServiceShortName+".spec", `(?s)DESCRIPTION:.*Specification of CustomService.*FIELDS:.*dummy.*<string>.*Dummy property`); err != nil {
+			_ = cleanupCRD(f, crdSvc) // need to remove the crd since its name is unchanged
+			framework.Failf("%v", err)
+		}
+
+		if err := cleanupCRD(f, crdSvc); err != nil {
+			framework.Failf("%v", err)
+		}
+	})
 })
 
 func setupCRD(f *framework.Framework, schema []byte, groupSuffix string, versions ...string) (*crd.TestCrd, error) {
@@ -488,19 +503,6 @@ func setupCRD(f *framework.Framework, schema []byte, groupSuffix string, version
 		expect = []byte(`type: object`)
 	}
 	return setupCRDAndVerifySchema(f, schema, expect, groupSuffix, versions...)
-}
-
-func setupCRDWithShortName(f *framework.Framework, schema []byte, groupSuffix, shortName string, versions ...string) (*crd.TestCrd, error) {
-	expect := schema
-	if schema == nil {
-		// to be backwards compatible, we expect CRD controller to treat
-		// CRD with nil schema specially and publish an empty schema
-		expect = []byte(`type: object`)
-	}
-	setShortName := func(crd *apiextensionsv1.CustomResourceDefinition) {
-		crd.Spec.Names.ShortNames = []string{shortName}
-	}
-	return setupCRDAndVerifySchemaWithOptions(f, schema, expect, groupSuffix, versions, setShortName)
 }
 
 func setupCRDAndVerifySchema(f *framework.Framework, schema, expect []byte, groupSuffix string, versions ...string) (*crd.TestCrd, error) {
@@ -682,10 +684,15 @@ func convertJSONSchemaProps(in []byte, out *spec.Schema) error {
 	if err := apiextensionsv1.Convert_v1_JSONSchemaProps_To_apiextensions_JSONSchemaProps(&external, &internal, nil); err != nil {
 		return err
 	}
-	if err := validation.ConvertJSONSchemaPropsWithPostProcess(&internal, out, validation.StripUnsupportedFormatsPostProcess); err != nil {
+	kubeOut := kubeopenapispec.Schema{}
+	if err := validation.ConvertJSONSchemaPropsWithPostProcess(&internal, &kubeOut, validation.StripUnsupportedFormatsPostProcess); err != nil {
 		return err
 	}
-	return nil
+	bs, err := json.Marshal(kubeOut)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(bs, out)
 }
 
 // dropDefaults drops properties and extension that we added to a schema

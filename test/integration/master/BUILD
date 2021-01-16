@@ -10,7 +10,7 @@ go_test(
     name = "go_default_test",
     size = "large",
     srcs = [
-        "audit_dynamic_test.go",
+        "apiserver_identity_test.go",
         "audit_test.go",
         "crd_test.go",
         "graceful_shutdown_test.go",
@@ -24,15 +24,14 @@ go_test(
     rundir = ".",
     tags = ["integration"],
     deps = [
-        "//cmd/kube-apiserver/app/options:go_default_library",
         "//cmd/kube-apiserver/app/testing:go_default_library",
-        "//pkg/master:go_default_library",
+        "//pkg/controlplane:go_default_library",
         "//staging/src/k8s.io/api/admission/v1beta1:go_default_library",
         "//staging/src/k8s.io/api/admissionregistration/v1beta1:go_default_library",
         "//staging/src/k8s.io/api/apps/v1:go_default_library",
+        "//staging/src/k8s.io/api/coordination/v1:go_default_library",
         "//staging/src/k8s.io/api/core/v1:go_default_library",
         "//staging/src/k8s.io/api/networking/v1:go_default_library",
-        "//staging/src/k8s.io/apiextensions-apiserver/pkg/apis/apiextensions:go_default_library",
         "//staging/src/k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1:go_default_library",
         "//staging/src/k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/api/errors:go_default_library",
@@ -40,6 +39,7 @@ go_test(
         "//staging/src/k8s.io/apimachinery/pkg/apis/meta/v1/unstructured:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/runtime/schema:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/types:go_default_library",
+        "//staging/src/k8s.io/apimachinery/pkg/util/intstr:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/util/wait:go_default_library",
         "//staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/mutating:go_default_library",
         "//staging/src/k8s.io/apiserver/pkg/apis/audit:go_default_library",
@@ -69,10 +69,13 @@ go_test(
         "//test/utils:go_default_library",
         "//vendor/github.com/evanphx/json-patch:go_default_library",
         "//vendor/github.com/go-openapi/spec:go_default_library",
-        "//vendor/github.com/stretchr/testify/require:go_default_library",
         "//vendor/k8s.io/utils/pointer:go_default_library",
         "//vendor/sigs.k8s.io/yaml:go_default_library",
     ] + select({
+        "@io_bazel_rules_go//go/platform:aix": [
+            "//staging/src/k8s.io/apiserver/pkg/storage/value/encrypt/envelope/testing:go_default_library",
+            "//staging/src/k8s.io/apiserver/pkg/storage/value/encrypt/envelope/v1beta1:go_default_library",
+        ],
         "@io_bazel_rules_go//go/platform:android": [
             "//staging/src/k8s.io/apiserver/pkg/storage/value/encrypt/envelope/testing:go_default_library",
             "//staging/src/k8s.io/apiserver/pkg/storage/value/encrypt/envelope/v1beta1:go_default_library",
@@ -89,7 +92,15 @@ go_test(
             "//staging/src/k8s.io/apiserver/pkg/storage/value/encrypt/envelope/testing:go_default_library",
             "//staging/src/k8s.io/apiserver/pkg/storage/value/encrypt/envelope/v1beta1:go_default_library",
         ],
+        "@io_bazel_rules_go//go/platform:illumos": [
+            "//staging/src/k8s.io/apiserver/pkg/storage/value/encrypt/envelope/testing:go_default_library",
+            "//staging/src/k8s.io/apiserver/pkg/storage/value/encrypt/envelope/v1beta1:go_default_library",
+        ],
         "@io_bazel_rules_go//go/platform:ios": [
+            "//staging/src/k8s.io/apiserver/pkg/storage/value/encrypt/envelope/testing:go_default_library",
+            "//staging/src/k8s.io/apiserver/pkg/storage/value/encrypt/envelope/v1beta1:go_default_library",
+        ],
+        "@io_bazel_rules_go//go/platform:js": [
             "//staging/src/k8s.io/apiserver/pkg/storage/value/encrypt/envelope/testing:go_default_library",
             "//staging/src/k8s.io/apiserver/pkg/storage/value/encrypt/envelope/v1beta1:go_default_library",
         ],
@@ -150,7 +161,7 @@ go_library(
         "//test/integration:go_default_library",
         "//test/integration/framework:go_default_library",
         "//vendor/go.etcd.io/etcd/clientv3:go_default_library",
-        "//vendor/k8s.io/klog:go_default_library",
+        "//vendor/k8s.io/klog/v2:go_default_library",
         "//vendor/sigs.k8s.io/yaml:go_default_library",
     ],
 )

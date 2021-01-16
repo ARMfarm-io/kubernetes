@@ -28,7 +28,7 @@ source "${KUBE_ROOT}/hack/lib/init.sh"
 
 kube::golang::setup_env
 
-make -C "${KUBE_ROOT}" WHAT=vendor/k8s.io/code-generator/cmd/import-boss
+go install k8s.io/kubernetes/vendor/k8s.io/code-generator/cmd/import-boss
 
 packages=(
   "k8s.io/kubernetes/pkg/..."
@@ -43,4 +43,4 @@ for d in staging/src/k8s.io/*/; do
   fi
 done
 
-$(kube::util::find-binary "import-boss") --verify-only "$@" --input-dirs "$(IFS=, ; echo "${packages[*]}")"
+$(kube::util::find-binary "import-boss") --include-test-files=true --verify-only --input-dirs "$(IFS=, ; echo "${packages[*]}")"

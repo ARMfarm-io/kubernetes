@@ -35,7 +35,7 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 func TestGetDeviceName_Volume(t *testing.T) {
@@ -458,7 +458,7 @@ func createPVSpec(name string, readOnly bool, zones []string) *volume.Spec {
 	if zones != nil {
 		zonesLabel := strings.Join(zones, cloudvolume.LabelMultiZoneDelimiter)
 		spec.PersistentVolume.ObjectMeta.Labels = map[string]string{
-			v1.LabelZoneFailureDomain: zonesLabel,
+			v1.LabelFailureDomainBetaZone: zonesLabel,
 		}
 	}
 

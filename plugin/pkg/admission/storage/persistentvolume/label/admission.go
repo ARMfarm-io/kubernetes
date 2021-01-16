@@ -30,7 +30,7 @@ import (
 	cloudprovider "k8s.io/cloud-provider"
 	cloudvolume "k8s.io/cloud-provider/volume"
 	volumehelpers "k8s.io/cloud-provider/volume/helpers"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	k8s_api_v1 "k8s.io/kubernetes/pkg/apis/core/v1"
 	persistentvolume "k8s.io/kubernetes/pkg/controller/volume/persistentvolume/util"
@@ -130,7 +130,7 @@ func (l *persistentVolumeLabel) Admit(ctx context.Context, a admission.Attribute
 
 			// Set NodeSelectorRequirements based on the labels
 			var values []string
-			if k == v1.LabelZoneFailureDomain {
+			if k == v1.LabelFailureDomainBetaZone {
 				zones, err := volumehelpers.LabelZonesToSet(v)
 				if err != nil {
 					return admission.NewForbidden(a, fmt.Errorf("failed to convert label string for Zone: %s to a Set", v))
@@ -172,14 +172,14 @@ func (l *persistentVolumeLabel) findVolumeLabels(volume *api.PersistentVolume) (
 	existingLabels := volume.Labels
 
 	// All cloud providers set only these two labels.
-	domain, domainOK := existingLabels[v1.LabelZoneFailureDomain]
-	region, regionOK := existingLabels[v1.LabelZoneRegion]
+	domain, domainOK := existingLabels[v1.LabelFailureDomainBetaZone]
+	region, regionOK := existingLabels[v1.LabelFailureDomainBetaRegion]
 	isDynamicallyProvisioned := metav1.HasAnnotation(volume.ObjectMeta, persistentvolume.AnnDynamicallyProvisioned)
 	if isDynamicallyProvisioned && domainOK && regionOK {
 		// PV already has all the labels and we can trust the dynamic provisioning that it provided correct values.
 		return map[string]string{
-			v1.LabelZoneFailureDomain: domain,
-			v1.LabelZoneRegion:        region,
+			v1.LabelFailureDomainBetaZone:   domain,
+			v1.LabelFailureDomainBetaRegion: region,
 		}, nil
 	}
 

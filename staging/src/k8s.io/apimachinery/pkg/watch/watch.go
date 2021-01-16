@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"sync"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -276,7 +276,7 @@ func (f *RaceFreeFakeWatcher) Action(action EventType, obj runtime.Object) {
 	}
 }
 
-// ProxyWatcher lets you wrap your channel in watch Interface. Threadsafe.
+// ProxyWatcher lets you wrap your channel in watch Interface. threadsafe.
 type ProxyWatcher struct {
 	result chan Event
 	stopCh chan struct{}

@@ -33,7 +33,7 @@ import (
 	certutil "k8s.io/client-go/util/cert"
 	bootstrapapi "k8s.io/cluster-bootstrap/token/api"
 	bootstrap "k8s.io/cluster-bootstrap/token/jws"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmapiv1beta2 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta2"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
@@ -62,7 +62,7 @@ func retrieveValidatedConfigInfo(client clientset.Interface, cfg *kubeadmapi.Dis
 	// Load the CACertHashes into a pubkeypin.Set
 	pubKeyPins := pubkeypin.NewSet()
 	if err = pubKeyPins.Allow(cfg.BootstrapToken.CACertHashes...); err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "invalid discovery token CA certificate hash")
 	}
 
 	duration := cfg.Timeout.Duration

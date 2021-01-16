@@ -22,7 +22,7 @@ import (
 	info "github.com/google/cadvisor/info/v1"
 	"github.com/google/cadvisor/watcher"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 type ContainerHandlerFactory interface {
@@ -47,6 +47,7 @@ const (
 	ProcessSchedulerMetrics        MetricKind = "sched"
 	PerCpuUsageMetrics             MetricKind = "percpu"
 	MemoryUsageMetrics             MetricKind = "memory"
+	MemoryNumaMetrics              MetricKind = "memory_numa"
 	CpuLoadMetrics                 MetricKind = "cpuLoad"
 	DiskIOMetrics                  MetricKind = "diskIO"
 	DiskUsageMetrics               MetricKind = "disk"
@@ -58,6 +59,10 @@ const (
 	AppMetrics                     MetricKind = "app"
 	ProcessMetrics                 MetricKind = "process"
 	HugetlbUsageMetrics            MetricKind = "hugetlb"
+	PerfMetrics                    MetricKind = "perf_event"
+	ReferencedMemoryMetrics        MetricKind = "referenced_memory"
+	CPUTopologyMetrics             MetricKind = "cpu_topology"
+	ResctrlMetrics                 MetricKind = "resctrl"
 )
 
 // AllMetrics represents all kinds of metrics that cAdvisor supported.
@@ -66,6 +71,7 @@ var AllMetrics = MetricSet{
 	ProcessSchedulerMetrics:        struct{}{},
 	PerCpuUsageMetrics:             struct{}{},
 	MemoryUsageMetrics:             struct{}{},
+	MemoryNumaMetrics:              struct{}{},
 	CpuLoadMetrics:                 struct{}{},
 	DiskIOMetrics:                  struct{}{},
 	AcceleratorUsageMetrics:        struct{}{},
@@ -77,6 +83,10 @@ var AllMetrics = MetricSet{
 	ProcessMetrics:                 struct{}{},
 	AppMetrics:                     struct{}{},
 	HugetlbUsageMetrics:            struct{}{},
+	PerfMetrics:                    struct{}{},
+	ReferencedMemoryMetrics:        struct{}{},
+	CPUTopologyMetrics:             struct{}{},
+	ResctrlMetrics:                 struct{}{},
 }
 
 func (mk MetricKind) String() string {
@@ -204,9 +214,8 @@ func NewContainerHandler(name string, watchType watcher.ContainerWatchSource, in
 			klog.V(3).Infof("Using factory %q for container %q", factory, name)
 			handle, err := factory.NewContainerHandler(name, inHostNamespace)
 			return handle, canAccept, err
-		} else {
-			klog.V(4).Infof("Factory %q was unable to handle container %q", factory, name)
 		}
+		klog.V(4).Infof("Factory %q was unable to handle container %q", factory, name)
 	}
 
 	return nil, false, fmt.Errorf("no known factory can handle creation of container")

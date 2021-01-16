@@ -52,18 +52,11 @@ const (
 	flagUsername         = "username"
 	flagPassword         = "password"
 	flagTimeout          = "request-timeout"
-	flagHTTPCacheDir     = "cache-dir"
+	flagCacheDir         = "cache-dir"
 )
 
 var (
-	defaultCacheDir = filepath.Join(homedir.HomeDir(), ".kube", "http-cache")
-	ErrEmptyConfig  = clientcmd.NewEmptyConfigError(`Missing or incomplete configuration info.  Please point to an existing, complete config file:
-
-  1. Via the command-line flag --kubeconfig
-  2. Via the KUBECONFIG environment variable
-  3. In your home directory as ~/.kube/config
-
-To view or setup config directly use the 'config' command.`)
+	defaultCacheDir = filepath.Join(homedir.HomeDir(), ".kube", "cache")
 )
 
 // RESTClientGetter is an interface that the ConfigFlags describe to provide an easier way to mock for commands
@@ -112,6 +105,9 @@ type ConfigFlags struct {
 	// propagate the config to the places that need it, rather than
 	// loading the config multiple times
 	usePersistentConfig bool
+	// Allows increasing burst used for discovery, this is useful
+	// in clusters with many registered resources
+	discoveryBurst int
 }
 
 // ToRESTConfig implements RESTClientGetter.
@@ -119,12 +115,7 @@ type ConfigFlags struct {
 // to a .kubeconfig file, loading rules, and config flag overrides.
 // Expects the AddFlags method to have been called.
 func (f *ConfigFlags) ToRESTConfig() (*rest.Config, error) {
-	config, err := f.ToRawKubeConfigLoader().ClientConfig()
-	// replace client-go's ErrEmptyConfig error with our custom, more verbose version
-	if clientcmd.IsEmptyConfig(err) {
-		return nil, ErrEmptyConfig
-	}
-	return config, err
+	return f.ToRawKubeConfigLoader().ClientConfig()
 }
 
 // ToRawKubeConfigLoader binds config flag values to config overrides
@@ -204,16 +195,11 @@ func (f *ConfigFlags) toRawKubeConfigLoader() clientcmd.ClientConfig {
 		overrides.Timeout = *f.Timeout
 	}
 
-	var clientConfig clientcmd.ClientConfig
-
 	// we only have an interactive prompt when a password is allowed
 	if f.Password == nil {
-		clientConfig = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides)
-	} else {
-		clientConfig = clientcmd.NewInteractiveDeferredLoadingClientConfig(loadingRules, overrides, os.Stdin)
+		return &clientConfig{clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides)}
 	}
-
-	return clientConfig
+	return &clientConfig{clientcmd.NewInteractiveDeferredLoadingClientConfig(loadingRules, overrides, os.Stdin)}
 }
 
 // toRawKubePersistentConfigLoader binds config flag values to config overrides
@@ -241,16 +227,18 @@ func (f *ConfigFlags) ToDiscoveryClient() (discovery.CachedDiscoveryInterface, e
 	// The more groups you have, the more discovery requests you need to make.
 	// given 25 groups (our groups + a few custom resources) with one-ish version each, discovery needs to make 50 requests
 	// double it just so we don't end up here again for a while.  This config is only used for discovery.
-	config.Burst = 100
+	config.Burst = f.discoveryBurst
+
+	cacheDir := defaultCacheDir
 
 	// retrieve a user-provided value for the "cache-dir"
-	// defaulting to ~/.kube/http-cache if no user-value is given.
-	httpCacheDir := defaultCacheDir
+	// override httpCacheDir and discoveryCacheDir if user-value is given.
 	if f.CacheDir != nil {
-		httpCacheDir = *f.CacheDir
+		cacheDir = *f.CacheDir
 	}
+	httpCacheDir := filepath.Join(cacheDir, "http")
+	discoveryCacheDir := computeDiscoverCacheDir(filepath.Join(cacheDir, "discovery"), config.Host)
 
-	discoveryCacheDir := computeDiscoverCacheDir(filepath.Join(homedir.HomeDir(), ".kube", "cache", "discovery"), config.Host)
 	return diskcached.NewCachedDiscoveryClientForConfig(config, discoveryCacheDir, httpCacheDir, time.Duration(10*time.Minute))
 }
 
@@ -272,7 +260,7 @@ func (f *ConfigFlags) AddFlags(flags *pflag.FlagSet) {
 		flags.StringVar(f.KubeConfig, "kubeconfig", *f.KubeConfig, "Path to the kubeconfig file to use for CLI requests.")
 	}
 	if f.CacheDir != nil {
-		flags.StringVar(f.CacheDir, flagHTTPCacheDir, *f.CacheDir, "Default HTTP cache directory")
+		flags.StringVar(f.CacheDir, flagCacheDir, *f.CacheDir, "Default cache directory")
 	}
 
 	// add config options
@@ -335,6 +323,12 @@ func (f *ConfigFlags) WithDeprecatedPasswordFlag() *ConfigFlags {
 	return f
 }
 
+// WithDiscoveryBurst sets the RESTClient burst for discovery.
+func (f *ConfigFlags) WithDiscoveryBurst(discoveryBurst int) *ConfigFlags {
+	f.discoveryBurst = discoveryBurst
+	return f
+}
+
 // NewConfigFlags returns ConfigFlags with default values set
 func NewConfigFlags(usePersistentConfig bool) *ConfigFlags {
 	impersonateGroup := []string{}
@@ -360,6 +354,10 @@ func NewConfigFlags(usePersistentConfig bool) *ConfigFlags {
 		ImpersonateGroup: &impersonateGroup,
 
 		usePersistentConfig: usePersistentConfig,
+		// The more groups you have, the more discovery requests you need to make.
+		// given 25 groups (our groups + a few custom resources) with one-ish version each, discovery needs to make 50 requests
+		// double it just so we don't end up here again for a while.  This config is only used for discovery.
+		discoveryBurst: 100,
 	}
 }
 

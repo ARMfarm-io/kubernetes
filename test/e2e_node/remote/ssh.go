@@ -19,12 +19,13 @@ package remote
 import (
 	"flag"
 	"fmt"
+	"os"
 	"os/exec"
 	"os/user"
 	"strings"
 	"sync"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 var sshOptions = flag.String("ssh-options", "", "Commandline options passed to ssh.")
@@ -68,6 +69,11 @@ func GetHostnameOrIP(hostname string) string {
 	if ip, found := hostnameIPOverrides.m[hostname]; found {
 		host = ip
 	}
+
+	if *sshUser == "" {
+		*sshUser = os.Getenv("KUBE_SSH_USER")
+	}
+
 	if *sshUser != "" {
 		host = fmt.Sprintf("%s@%s", *sshUser, host)
 	}

@@ -36,7 +36,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/component-base/metrics/prometheus/ratelimiter"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -135,9 +135,6 @@ func (gcc *PodGCController) gcTerminated(pods []*v1.Pod) {
 	terminatedPodCount := len(terminatedPods)
 	deleteCount := terminatedPodCount - gcc.terminatedPodThreshold
 
-	if deleteCount > terminatedPodCount {
-		deleteCount = terminatedPodCount
-	}
 	if deleteCount <= 0 {
 		return
 	}

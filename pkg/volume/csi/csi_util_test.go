@@ -31,7 +31,7 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // TestMain starting point for all tests.
@@ -85,6 +85,7 @@ func makeTestVol(name string, driverName string) *api.Volume {
 }
 
 func getTestCSIDriver(name string, podInfoMount *bool, attachable *bool, volumeLifecycleModes []storagev1.VolumeLifecycleMode) *storagev1.CSIDriver {
+	defaultFSGroupPolicy := storagev1.ReadWriteOnceWithFSTypeFSGroupPolicy
 	return &storagev1.CSIDriver{
 		ObjectMeta: meta.ObjectMeta{
 			Name: name,
@@ -93,6 +94,7 @@ func getTestCSIDriver(name string, podInfoMount *bool, attachable *bool, volumeL
 			PodInfoOnMount:       podInfoMount,
 			AttachRequired:       attachable,
 			VolumeLifecycleModes: volumeLifecycleModes,
+			FSGroupPolicy:        &defaultFSGroupPolicy,
 		},
 	}
 }

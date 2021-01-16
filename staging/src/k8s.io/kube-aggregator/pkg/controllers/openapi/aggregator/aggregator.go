@@ -26,7 +26,7 @@ import (
 	restful "github.com/emicklei/go-restful"
 	"github.com/go-openapi/spec"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/apiserver/pkg/server"
 	v1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
@@ -175,7 +175,12 @@ func (s *specAggregator) buildOpenAPISpec() (specToReturn *spec.Swagger, err err
 		if specInfo.spec == nil {
 			continue
 		}
-		specs = append(specs, *specInfo)
+		// Copy the spec before removing the defaults.
+		localSpec := *specInfo.spec
+		localSpecInfo := *specInfo
+		localSpecInfo.spec = &localSpec
+		localSpecInfo.spec.Definitions = handler.PruneDefaults(specInfo.spec.Definitions)
+		specs = append(specs, localSpecInfo)
 	}
 	if len(specs) == 0 {
 		return &spec.Swagger{}, nil
