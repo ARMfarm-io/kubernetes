@@ -21,7 +21,7 @@ import (
 	"sort"
 	"time"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	autoscaling "k8s.io/api/autoscaling/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -204,9 +204,9 @@ func sortGroupDiscoveryByKubeAwareVersion(gd []metav1.GroupVersionForDiscovery) 
 func (c *DiscoveryController) Run(stopCh <-chan struct{}, synchedCh chan<- struct{}) {
 	defer utilruntime.HandleCrash()
 	defer c.queue.ShutDown()
-	defer klog.Infof("Shutting down DiscoveryController")
+	defer klog.Info("Shutting down DiscoveryController")
 
-	klog.Infof("Starting DiscoveryController")
+	klog.Info("Starting DiscoveryController")
 
 	if !cache.WaitForCacheSync(stopCh, c.crdsSynced) {
 		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))

@@ -40,7 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	versionutil "k8s.io/apimachinery/pkg/util/version"
 	kubeadmversion "k8s.io/component-base/version"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/cmd/kubeadm/app/images"
@@ -869,6 +869,16 @@ func (ncc NumCPUCheck) Check() (warnings, errorList []error) {
 	return warnings, errorList
 }
 
+// MemCheck checks if the number of megabytes of memory is not less than required
+type MemCheck struct {
+	Mem uint64
+}
+
+// Name returns the label for memory
+func (MemCheck) Name() string {
+	return "Mem"
+}
+
 // RunInitNodeChecks executes all individual, applicable to control-plane node checks.
 // The boolean flag 'isSecondaryControlPlane' controls whether we are running checks in a --join-control-plane scenario.
 // The boolean flag 'downloadCerts' controls whether we should skip checks on certificates because we are downloading them.
@@ -884,6 +894,9 @@ func RunInitNodeChecks(execer utilsexec.Interface, cfg *kubeadmapi.InitConfigura
 	manifestsDir := filepath.Join(kubeadmconstants.KubernetesDir, kubeadmconstants.ManifestsSubDirName)
 	checks := []Checker{
 		NumCPUCheck{NumCPU: kubeadmconstants.ControlPlaneNumCPU},
+		// Linux only
+		// TODO: support other OS, if control-plane is supported on it.
+		MemCheck{Mem: kubeadmconstants.ControlPlaneMem},
 		KubernetesVersionCheck{KubernetesVersion: cfg.KubernetesVersion, KubeadmVersion: kubeadmversion.Get().GitVersion},
 		FirewalldCheck{ports: []int{int(cfg.LocalAPIEndpoint.BindPort), kubeadmconstants.KubeletPort}},
 		PortOpenCheck{port: int(cfg.LocalAPIEndpoint.BindPort)},

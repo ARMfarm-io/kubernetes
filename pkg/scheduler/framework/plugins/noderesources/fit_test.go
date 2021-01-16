@@ -19,14 +19,19 @@ package noderesources
 import (
 	"context"
 	"fmt"
-	"k8s.io/apimachinery/pkg/runtime"
 	"reflect"
+	"strings"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/component-base/featuregate"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
-	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/kubernetes/pkg/scheduler/apis/config"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 var (
@@ -62,7 +67,7 @@ func makeAllocatableResources(milliCPU, memory, pods, extendedA, storage, hugePa
 }
 
 func newResourcePod(usage ...framework.Resource) *v1.Pod {
-	containers := []v1.Container{}
+	var containers []v1.Container
 	for _, req := range usage {
 		containers = append(containers, v1.Container{
 			Resources: v1.ResourceRequirements{Requests: req.ResourceList()},
@@ -94,7 +99,7 @@ func TestEnoughRequests(t *testing.T) {
 		pod                       *v1.Pod
 		nodeInfo                  *framework.NodeInfo
 		name                      string
-		ignoredResources          []byte
+		args                      config.NodeResourcesFitArgs
 		wantInsufficientResources []InsufficientResource
 		wantStatus                *framework.Status
 	}{
@@ -340,8 +345,10 @@ func TestEnoughRequests(t *testing.T) {
 		{
 			pod: newResourcePod(
 				framework.Resource{MilliCPU: 1, Memory: 1, ScalarResources: map[v1.ResourceName]int64{extendedResourceB: 1}}),
-			nodeInfo:                  framework.NewNodeInfo(newResourcePod(framework.Resource{MilliCPU: 0, Memory: 0})),
-			ignoredResources:          []byte(`{"IgnoredResources" : ["example.com/bbb"]}`),
+			nodeInfo: framework.NewNodeInfo(newResourcePod(framework.Resource{MilliCPU: 0, Memory: 0})),
+			args: config.NodeResourcesFitArgs{
+				IgnoredResources: []string{"example.com/bbb"},
+			},
 			name:                      "skip checking ignored extended resource",
 			wantInsufficientResources: []InsufficientResource{},
 		},
@@ -364,6 +371,31 @@ func TestEnoughRequests(t *testing.T) {
 			wantStatus:                framework.NewStatus(framework.Unschedulable, getErrReason(v1.ResourceMemory)),
 			wantInsufficientResources: []InsufficientResource{{v1.ResourceMemory, getErrReason(v1.ResourceMemory), 16, 5, 20}},
 		},
+		{
+			pod: newResourcePod(
+				framework.Resource{
+					MilliCPU: 1,
+					Memory:   1,
+					ScalarResources: map[v1.ResourceName]int64{
+						extendedResourceB:     1,
+						kubernetesIOResourceA: 1,
+					}}),
+			nodeInfo: framework.NewNodeInfo(newResourcePod(framework.Resource{MilliCPU: 0, Memory: 0})),
+			args: config.NodeResourcesFitArgs{
+				IgnoredResourceGroups: []string{"example.com"},
+			},
+			name:       "skip checking ignored extended resource via resource groups",
+			wantStatus: framework.NewStatus(framework.Unschedulable, fmt.Sprintf("Insufficient %v", kubernetesIOResourceA)),
+			wantInsufficientResources: []InsufficientResource{
+				{
+					ResourceName: kubernetesIOResourceA,
+					Reason:       fmt.Sprintf("Insufficient %v", kubernetesIOResourceA),
+					Requested:    1,
+					Used:         0,
+					Capacity:     0,
+				},
+			},
+		},
 	}
 
 	for _, test := range enoughPodsTests {
@@ -371,8 +403,10 @@ func TestEnoughRequests(t *testing.T) {
 			node := v1.Node{Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 5, 20, 5).Capacity, Allocatable: makeAllocatableResources(10, 20, 32, 5, 20, 5)}}
 			test.nodeInfo.SetNode(&node)
 
-			args := &runtime.Unknown{Raw: test.ignoredResources}
-			p, _ := NewFit(args, nil)
+			p, err := NewFit(&test.args, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 			cycleState := framework.NewCycleState()
 			preFilterStatus := p.(framework.PreFilterPlugin).PreFilter(context.Background(), cycleState, test.pod)
 			if !preFilterStatus.IsSuccess() {
@@ -384,9 +418,9 @@ func TestEnoughRequests(t *testing.T) {
 				t.Errorf("status does not match: %v, want: %v", gotStatus, test.wantStatus)
 			}
 
-			gotInsufficientResources := Fits(test.pod, test.nodeInfo, p.(*Fit).ignoredResources)
+			gotInsufficientResources := fitsRequest(computePodResourceRequest(test.pod), test.nodeInfo, p.(*Fit).ignoredResources, p.(*Fit).ignoredResourceGroups)
 			if !reflect.DeepEqual(gotInsufficientResources, test.wantInsufficientResources) {
-				t.Errorf("insufficient resources do not match: %v, want: %v", gotInsufficientResources, test.wantInsufficientResources)
+				t.Errorf("insufficient resources do not match: %+v, want: %v", gotInsufficientResources, test.wantInsufficientResources)
 			}
 		})
 	}
@@ -397,7 +431,10 @@ func TestPreFilterDisabled(t *testing.T) {
 	nodeInfo := framework.NewNodeInfo()
 	node := v1.Node{}
 	nodeInfo.SetNode(&node)
-	p, _ := NewFit(nil, nil)
+	p, err := NewFit(&config.NodeResourcesFitArgs{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cycleState := framework.NewCycleState()
 	gotStatus := p.(framework.FilterPlugin).Filter(context.Background(), cycleState, pod, nodeInfo)
 	wantStatus := framework.NewStatus(framework.Error, `error reading "PreFilterNodeResourcesFit" from cycleState: not found`)
@@ -444,7 +481,10 @@ func TestNotEnoughRequests(t *testing.T) {
 			node := v1.Node{Status: v1.NodeStatus{Capacity: v1.ResourceList{}, Allocatable: makeAllocatableResources(10, 20, 1, 0, 0, 0)}}
 			test.nodeInfo.SetNode(&node)
 
-			p, _ := NewFit(nil, nil)
+			p, err := NewFit(&config.NodeResourcesFitArgs{}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 			cycleState := framework.NewCycleState()
 			preFilterStatus := p.(framework.PreFilterPlugin).PreFilter(context.Background(), cycleState, test.pod)
 			if !preFilterStatus.IsSuccess() {
@@ -465,6 +505,7 @@ func TestStorageRequests(t *testing.T) {
 		pod        *v1.Pod
 		nodeInfo   *framework.NodeInfo
 		name       string
+		features   map[featuregate.Feature]bool
 		wantStatus *framework.Status
 	}{
 		{
@@ -488,6 +529,15 @@ func TestStorageRequests(t *testing.T) {
 			wantStatus: framework.NewStatus(framework.Unschedulable, getErrReason(v1.ResourceEphemeralStorage)),
 		},
 		{
+			pod: newResourceInitPod(newResourcePod(framework.Resource{EphemeralStorage: 25}), framework.Resource{EphemeralStorage: 25}),
+			nodeInfo: framework.NewNodeInfo(
+				newResourcePod(framework.Resource{MilliCPU: 2, Memory: 2})),
+			name: "ephemeral local storage request is ignored due to disabled feature gate",
+			features: map[featuregate.Feature]bool{
+				features.LocalStorageCapacityIsolation: false,
+			},
+		},
+		{
 			pod: newResourcePod(framework.Resource{EphemeralStorage: 10}),
 			nodeInfo: framework.NewNodeInfo(
 				newResourcePod(framework.Resource{MilliCPU: 2, Memory: 2})),
@@ -497,10 +547,16 @@ func TestStorageRequests(t *testing.T) {
 
 	for _, test := range storagePodsTests {
 		t.Run(test.name, func(t *testing.T) {
+			for k, v := range test.features {
+				defer featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, k, v)()
+			}
 			node := v1.Node{Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 5, 20, 5).Capacity, Allocatable: makeAllocatableResources(10, 20, 32, 5, 20, 5)}}
 			test.nodeInfo.SetNode(&node)
 
-			p, _ := NewFit(nil, nil)
+			p, err := NewFit(&config.NodeResourcesFitArgs{}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 			cycleState := framework.NewCycleState()
 			preFilterStatus := p.(framework.PreFilterPlugin).PreFilter(context.Background(), cycleState, test.pod)
 			if !preFilterStatus.IsSuccess() {
@@ -514,4 +570,73 @@ func TestStorageRequests(t *testing.T) {
 		})
 	}
 
+}
+
+func TestValidateFitArgs(t *testing.T) {
+	argsTest := []struct {
+		name   string
+		args   config.NodeResourcesFitArgs
+		expect string
+	}{
+		{
+			name: "IgnoredResources: too long value",
+			args: config.NodeResourcesFitArgs{
+				IgnoredResources: []string{fmt.Sprintf("longvalue%s", strings.Repeat("a", 64))},
+			},
+			expect: "name part must be no more than 63 characters",
+		},
+		{
+			name: "IgnoredResources: name is empty",
+			args: config.NodeResourcesFitArgs{
+				IgnoredResources: []string{"example.com/"},
+			},
+			expect: "name part must be non-empty",
+		},
+		{
+			name: "IgnoredResources: name has too many slash",
+			args: config.NodeResourcesFitArgs{
+				IgnoredResources: []string{"example.com/aaa/bbb"},
+			},
+			expect: "a qualified name must consist of alphanumeric characters",
+		},
+		{
+			name: "IgnoredResources: valid args",
+			args: config.NodeResourcesFitArgs{
+				IgnoredResources: []string{"example.com"},
+			},
+		},
+		{
+			name: "IgnoredResourceGroups: valid args ",
+			args: config.NodeResourcesFitArgs{
+				IgnoredResourceGroups: []string{"example.com"},
+			},
+		},
+		{
+			name: "IgnoredResourceGroups: illegal args",
+			args: config.NodeResourcesFitArgs{
+				IgnoredResourceGroups: []string{"example.com/"},
+			},
+			expect: "name part must be non-empty",
+		},
+		{
+			name: "IgnoredResourceGroups: name is too long",
+			args: config.NodeResourcesFitArgs{
+				IgnoredResourceGroups: []string{strings.Repeat("a", 64)},
+			},
+			expect: "name part must be no more than 63 characters",
+		},
+		{
+			name: "IgnoredResourceGroups: name cannot be contain slash",
+			args: config.NodeResourcesFitArgs{
+				IgnoredResourceGroups: []string{"example.com/aa"},
+			},
+			expect: "resource group name can't contain '/'",
+		},
+	}
+
+	for _, test := range argsTest {
+		if err := validateFitArgs(test.args); err != nil && !strings.Contains(err.Error(), test.expect) {
+			t.Errorf("case[%v]: error details do not include %v", test.name, err)
+		}
+	}
 }

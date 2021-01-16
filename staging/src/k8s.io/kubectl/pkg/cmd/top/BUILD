@@ -26,7 +26,7 @@ go_library(
         "//staging/src/k8s.io/metrics/pkg/client/clientset/versioned:go_default_library",
         "//vendor/github.com/spf13/cobra:go_default_library",
         "//vendor/github.com/spf13/pflag:go_default_library",
-        "//vendor/k8s.io/klog:go_default_library",
+        "//vendor/k8s.io/klog/v2:go_default_library",
     ],
 )
 
@@ -47,7 +47,6 @@ go_test(
         "//staging/src/k8s.io/client-go/rest/fake:go_default_library",
         "//staging/src/k8s.io/client-go/testing:go_default_library",
         "//staging/src/k8s.io/kubectl/pkg/cmd/testing:go_default_library",
-        "//staging/src/k8s.io/kubectl/pkg/cmd/util:go_default_library",
         "//staging/src/k8s.io/kubectl/pkg/scheme:go_default_library",
         "//staging/src/k8s.io/metrics/pkg/apis/metrics/v1alpha1:go_default_library",
         "//staging/src/k8s.io/metrics/pkg/apis/metrics/v1beta1:go_default_library",

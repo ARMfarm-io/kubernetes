@@ -39,8 +39,8 @@ go_library(
     ],
     importpath = "k8s.io/kubernetes/test/e2e/storage/vsphere",
     deps = [
+        "//pkg/cluster/ports:go_default_library",
         "//pkg/controller/volume/events:go_default_library",
-        "//pkg/master/ports:go_default_library",
         "//staging/src/k8s.io/api/apps/v1:go_default_library",
         "//staging/src/k8s.io/api/core/v1:go_default_library",
         "//staging/src/k8s.io/api/storage/v1:go_default_library",
@@ -75,7 +75,7 @@ go_library(
         "//vendor/github.com/vmware/govmomi/vim25/soap:go_default_library",
         "//vendor/github.com/vmware/govmomi/vim25/types:go_default_library",
         "//vendor/gopkg.in/gcfg.v1:go_default_library",
-        "//vendor/k8s.io/klog:go_default_library",
+        "//vendor/k8s.io/klog/v2:go_default_library",
     ],
 )
 

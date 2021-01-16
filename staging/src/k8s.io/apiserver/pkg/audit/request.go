@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	authnv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -43,9 +43,9 @@ const (
 	userAgentTruncateSuffix = "...TRUNCATED"
 )
 
-func NewEventFromRequest(req *http.Request, level auditinternal.Level, attribs authorizer.Attributes) (*auditinternal.Event, error) {
+func NewEventFromRequest(req *http.Request, requestReceivedTimestamp time.Time, level auditinternal.Level, attribs authorizer.Attributes) (*auditinternal.Event, error) {
 	ev := &auditinternal.Event{
-		RequestReceivedTimestamp: metav1.NewMicroTime(time.Now()),
+		RequestReceivedTimestamp: metav1.NewMicroTime(requestReceivedTimestamp),
 		Verb:                     attribs.GetVerb(),
 		RequestURI:               req.URL.RequestURI(),
 		UserAgent:                maybeTruncateUserAgent(req),

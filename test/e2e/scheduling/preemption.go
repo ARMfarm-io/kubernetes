@@ -18,11 +18,13 @@ package scheduling
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	schedulingv1 "k8s.io/api/scheduling/v1"
@@ -30,18 +32,18 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	v1qos "k8s.io/kubernetes/pkg/apis/core/v1/helper/qos"
 	"k8s.io/kubernetes/pkg/apis/scheduling"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2ereplicaset "k8s.io/kubernetes/test/e2e/framework/replicaset"
-	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
@@ -54,6 +56,8 @@ type priorityPair struct {
 	name  string
 	value int32
 }
+
+var testExtendedResource = v1.ResourceName("scheduling.k8s.io/foo")
 
 var _ = SIGDescribe("SchedulerPreemption [Serial]", func() {
 	var cs clientset.Interface
@@ -75,6 +79,12 @@ var _ = SIGDescribe("SchedulerPreemption [Serial]", func() {
 		for _, pair := range priorityPairs {
 			cs.SchedulingV1().PriorityClasses().Delete(context.TODO(), pair.name, *metav1.NewDeleteOptions(0))
 		}
+		for _, node := range nodeList.Items {
+			nodeCopy := node.DeepCopy()
+			delete(nodeCopy.Status.Capacity, testExtendedResource)
+			err := patchNode(cs, &node, nodeCopy)
+			framework.ExpectNoError(err)
+		}
 	})
 
 	ginkgo.BeforeEach(func() {
@@ -88,45 +98,43 @@ var _ = SIGDescribe("SchedulerPreemption [Serial]", func() {
 		}
 
 		e2enode.WaitForTotalHealthy(cs, time.Minute)
-		masterNodes, nodeList, err = e2enode.GetMasterAndWorkerNodes(cs)
+		nodeList, err = e2enode.GetReadySchedulableNodes(cs)
 		if err != nil {
 			framework.Logf("Unexpected error occurred: %v", err)
 		}
 		framework.ExpectNoErrorWithOffset(0, err)
+		for _, n := range nodeList.Items {
+			workerNodes.Insert(n.Name)
+		}
 
 		err = framework.CheckTestingNSDeletedExcept(cs, ns)
 		framework.ExpectNoError(err)
 	})
 
-	// This test verifies that when a higher priority pod is created and no node with
-	// enough resources is found, scheduler preempts a lower priority pod to schedule
-	// the high priority pod.
-	ginkgo.It("validates basic preemption works", func() {
+	/*
+		Release: v1.19
+		Testname: Scheduler, Basic Preemption
+		Description: When a higher priority pod is created and no node with enough
+		resources is found, the scheduler MUST preempt a lower priority pod and
+		schedule the high priority pod.
+	*/
+	framework.ConformanceIt("validates basic preemption works", func() {
 		var podRes v1.ResourceList
+
 		// Create one pod per node that uses a lot of the node's resources.
-		ginkgo.By("Create pods that use 60% of node resources.")
+		ginkgo.By("Create pods that use 2/3 of node resources.")
 		pods := make([]*v1.Pod, 0, len(nodeList.Items))
-		allPods, err := cs.CoreV1().Pods(metav1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
-		framework.ExpectNoError(err)
+		// Now create victim pods on each of the node with lower priority
 		for i, node := range nodeList.Items {
-			currentCPUUsage, currentMemUsage := getCurrentPodUsageOnTheNode(node.Name, allPods.Items, podRequestedResource)
-			framework.Logf("Current cpu and memory usage %v, %v", currentCPUUsage, currentMemUsage)
-			cpuAllocatable, found := node.Status.Allocatable["cpu"]
-			framework.ExpectEqual(found, true)
-			milliCPU := cpuAllocatable.MilliValue()
-			milliCPU = int64(float64(milliCPU-currentCPUUsage) * float64(0.6))
-			memAllocatable, found := node.Status.Allocatable["memory"]
-			framework.ExpectEqual(found, true)
-			memory := memAllocatable.Value()
-			memory = int64(float64(memory-currentMemUsage) * float64(0.6))
-			// If a node is already heavily utilized let not's create a pod there.
-			if milliCPU <= 0 || memory <= 0 {
-				framework.Logf("Node is heavily utilized, let's not create a pod here")
-				continue
-			}
+			// Update each node to advertise 3 available extended resources
+			nodeCopy := node.DeepCopy()
+			nodeCopy.Status.Capacity[testExtendedResource] = resource.MustParse("3")
+			err := patchNode(cs, &node, nodeCopy)
+			framework.ExpectNoError(err)
+
+			// Request 2 of the available resources for the victim pods
 			podRes = v1.ResourceList{}
-			podRes[v1.ResourceCPU] = *resource.NewMilliQuantity(int64(milliCPU), resource.DecimalSI)
-			podRes[v1.ResourceMemory] = *resource.NewQuantity(int64(memory), resource.BinarySI)
+			podRes[testExtendedResource] = resource.MustParse("2")
 
 			// make the first pod low priority and the rest medium priority.
 			priorityName := mediumPriorityClassName
@@ -138,13 +146,26 @@ var _ = SIGDescribe("SchedulerPreemption [Serial]", func() {
 				PriorityClassName: priorityName,
 				Resources: &v1.ResourceRequirements{
 					Requests: podRes,
+					Limits:   podRes,
 				},
-				NodeName: node.Name,
+				Affinity: &v1.Affinity{
+					NodeAffinity: &v1.NodeAffinity{
+						RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
+							NodeSelectorTerms: []v1.NodeSelectorTerm{
+								{
+									MatchFields: []v1.NodeSelectorRequirement{
+										{Key: "metadata.name", Operator: v1.NodeSelectorOpIn, Values: []string{node.Name}},
+									},
+								},
+							},
+						},
+					},
+				},
 			}))
 			framework.Logf("Created pod: %v", pods[i].Name)
 		}
 		if len(pods) < 2 {
-			framework.Failf("We need at least two pods to be created but" +
+			framework.Failf("We need at least two pods to be created but " +
 				"all nodes are already heavily utilized, so preemption tests cannot be run")
 		}
 		ginkgo.By("Wait for pods to be scheduled.")
@@ -157,14 +178,14 @@ var _ = SIGDescribe("SchedulerPreemption [Serial]", func() {
 
 		ginkgo.By("Run a high priority pod that has same requirements as that of lower priority pod")
 		// Create a high priority pod and make sure it is scheduled on the same node as the low priority pod.
-		runPausePod(f, pausePodConfig{
+		runPausePodWithTimeout(f, pausePodConfig{
 			Name:              "preemptor-pod",
 			PriorityClassName: highPriorityClassName,
 			Resources: &v1.ResourceRequirements{
 				Requests: podRes,
+				Limits:   podRes,
 			},
-			NodeName: pods[0].Spec.NodeName,
-		})
+		}, framework.PodStartShortTimeout)
 
 		preemptedPod, err := cs.CoreV1().Pods(pods[0].Namespace).Get(context.TODO(), pods[0].Name, metav1.GetOptions{})
 		podPreempted := (err != nil && apierrors.IsNotFound(err)) ||
@@ -178,35 +199,28 @@ var _ = SIGDescribe("SchedulerPreemption [Serial]", func() {
 		framework.ExpectEqual(podPreempted, true)
 	})
 
-	// This test verifies that when a critical pod is created and no node with
-	// enough resources is found, scheduler preempts a lower priority pod to schedule
-	// this critical pod.
-	ginkgo.It("validates lower priority pod preemption by critical pod", func() {
+	/*
+		Release: v1.19
+		Testname: Scheduler, Preemption for critical pod
+		Description: When a critical pod is created and no node with enough
+		resources is found, the scheduler MUST preempt a lower priority pod to
+		schedule the critical pod.
+	*/
+	framework.ConformanceIt("validates lower priority pod preemption by critical pod", func() {
 		var podRes v1.ResourceList
-		// Create one pod per node that uses a lot of the node's resources.
-		ginkgo.By("Create pods that use 60% of node resources.")
+
+		ginkgo.By("Create pods that use 2/3 of node resources.")
 		pods := make([]*v1.Pod, 0, len(nodeList.Items))
-		allPods, err := cs.CoreV1().Pods(metav1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
-		framework.ExpectNoError(err)
 		for i, node := range nodeList.Items {
-			currentCPUUsage, currentMemUsage := getCurrentPodUsageOnTheNode(node.Name, allPods.Items, podRequestedResource)
-			framework.Logf("Current cpu usage and memory usage is %v, %v", currentCPUUsage, currentMemUsage)
-			cpuAllocatable, found := node.Status.Allocatable["cpu"]
-			framework.ExpectEqual(found, true)
-			milliCPU := cpuAllocatable.MilliValue()
-			milliCPU = int64(float64(milliCPU-currentCPUUsage) * float64(0.6))
-			memAllocatable, found := node.Status.Allocatable["memory"]
-			framework.ExpectEqual(found, true)
-			memory := memAllocatable.Value()
-			memory = int64(float64(memory-currentMemUsage) * float64(0.6))
+			// Update each node to advertise 3 available extended resources
+			nodeCopy := node.DeepCopy()
+			nodeCopy.Status.Capacity[testExtendedResource] = resource.MustParse("3")
+			err := patchNode(cs, &node, nodeCopy)
+			framework.ExpectNoError(err)
+
+			// Request 2 of the available resources for the victim pods
 			podRes = v1.ResourceList{}
-			// If a node is already heavily utilized let not's create a pod there.
-			if milliCPU <= 0 || memory <= 0 {
-				framework.Logf("Node is heavily utilized, let's not create a pod there")
-				continue
-			}
-			podRes[v1.ResourceCPU] = *resource.NewMilliQuantity(int64(milliCPU), resource.DecimalSI)
-			podRes[v1.ResourceMemory] = *resource.NewQuantity(int64(memory), resource.BinarySI)
+			podRes[testExtendedResource] = resource.MustParse("2")
 
 			// make the first pod low priority and the rest medium priority.
 			priorityName := mediumPriorityClassName
@@ -218,13 +232,26 @@ var _ = SIGDescribe("SchedulerPreemption [Serial]", func() {
 				PriorityClassName: priorityName,
 				Resources: &v1.ResourceRequirements{
 					Requests: podRes,
+					Limits:   podRes,
 				},
-				NodeName: node.Name,
+				Affinity: &v1.Affinity{
+					NodeAffinity: &v1.NodeAffinity{
+						RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
+							NodeSelectorTerms: []v1.NodeSelectorTerm{
+								{
+									MatchFields: []v1.NodeSelectorRequirement{
+										{Key: "metadata.name", Operator: v1.NodeSelectorOpIn, Values: []string{node.Name}},
+									},
+								},
+							},
+						},
+					},
+				},
 			}))
 			framework.Logf("Created pod: %v", pods[i].Name)
 		}
 		if len(pods) < 2 {
-			e2eskipper.Skipf("We need at least two pods to be created but" +
+			framework.Failf("We need at least two pods to be created but " +
 				"all nodes are already heavily utilized, so preemption tests cannot be run")
 		}
 		ginkgo.By("Wait for pods to be scheduled.")
@@ -244,15 +271,15 @@ var _ = SIGDescribe("SchedulerPreemption [Serial]", func() {
 				framework.Failf("Error cleanup pod `%s/%s`: %v", metav1.NamespaceSystem, "critical-pod", err)
 			}
 		}()
-		runPausePod(f, pausePodConfig{
+		runPausePodWithTimeout(f, pausePodConfig{
 			Name:              "critical-pod",
 			Namespace:         metav1.NamespaceSystem,
 			PriorityClassName: scheduling.SystemClusterCritical,
 			Resources: &v1.ResourceRequirements{
 				Requests: podRes,
+				Limits:   podRes,
 			},
-			NodeName: pods[0].Spec.NodeName,
-		})
+		}, framework.PodStartShortTimeout)
 
 		defer func() {
 			// Clean-up the critical pod
@@ -288,12 +315,10 @@ var _ = SIGDescribe("SchedulerPreemption [Serial]", func() {
 				node, err := cs.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
 				framework.ExpectNoError(err)
 				// update Node API object with a fake resource
-				nodeCopy := node.DeepCopy()
-				// force it to update
-				nodeCopy.ResourceVersion = "0"
 				ginkgo.By(fmt.Sprintf("Apply 10 fake resource to node %v.", node.Name))
+				nodeCopy := node.DeepCopy()
 				nodeCopy.Status.Capacity[fakeRes] = resource.MustParse("10")
-				node, err = cs.CoreV1().Nodes().UpdateStatus(context.TODO(), nodeCopy, metav1.UpdateOptions{})
+				err = patchNode(cs, node, nodeCopy)
 				framework.ExpectNoError(err)
 				nodes = append(nodes, node)
 			}
@@ -304,10 +329,8 @@ var _ = SIGDescribe("SchedulerPreemption [Serial]", func() {
 			}
 			for _, node := range nodes {
 				nodeCopy := node.DeepCopy()
-				// force it to update
-				nodeCopy.ResourceVersion = "0"
 				delete(nodeCopy.Status.Capacity, fakeRes)
-				_, err := cs.CoreV1().Nodes().UpdateStatus(context.TODO(), nodeCopy, metav1.UpdateOptions{})
+				err := patchNode(cs, node, nodeCopy)
 				framework.ExpectNoError(err)
 			}
 		})
@@ -439,12 +462,12 @@ var _ = SIGDescribe("SchedulerPreemption [Serial]", func() {
 		ginkgo.AfterEach(func() {
 			// print out additional info if tests failed
 			if ginkgo.CurrentGinkgoTestDescription().Failed {
-				// list existing priorities
+				// List existing PriorityClasses.
 				priorityList, err := cs.SchedulingV1().PriorityClasses().List(context.TODO(), metav1.ListOptions{})
 				if err != nil {
-					framework.Logf("Unable to list priorities: %v", err)
+					framework.Logf("Unable to list PriorityClasses: %v", err)
 				} else {
-					framework.Logf("List existing priorities:")
+					framework.Logf("List existing PriorityClasses:")
 					for _, p := range priorityList.Items {
 						framework.Logf("%v/%v created at %v", p.Name, p.Value, p.CreationTimestamp)
 					}
@@ -453,10 +476,8 @@ var _ = SIGDescribe("SchedulerPreemption [Serial]", func() {
 
 			if node != nil {
 				nodeCopy := node.DeepCopy()
-				// force it to update
-				nodeCopy.ResourceVersion = "0"
 				delete(nodeCopy.Status.Capacity, fakecpu)
-				_, err := cs.CoreV1().Nodes().UpdateStatus(context.TODO(), nodeCopy, metav1.UpdateOptions{})
+				err := patchNode(cs, node, nodeCopy)
 				framework.ExpectNoError(err)
 			}
 			for _, pair := range priorityPairs {
@@ -487,10 +508,8 @@ var _ = SIGDescribe("SchedulerPreemption [Serial]", func() {
 
 			// update Node API object with a fake resource
 			nodeCopy := node.DeepCopy()
-			// force it to update
-			nodeCopy.ResourceVersion = "0"
 			nodeCopy.Status.Capacity[fakecpu] = resource.MustParse("1000")
-			node, err = cs.CoreV1().Nodes().UpdateStatus(context.TODO(), nodeCopy, metav1.UpdateOptions{})
+			err = patchNode(cs, node, nodeCopy)
 			framework.ExpectNoError(err)
 
 			// create four PriorityClass: p1, p2, p3, p4
@@ -500,8 +519,7 @@ var _ = SIGDescribe("SchedulerPreemption [Serial]", func() {
 				priorityPairs = append(priorityPairs, priorityPair{name: priorityName, value: priorityVal})
 				_, err := cs.SchedulingV1().PriorityClasses().Create(context.TODO(), &schedulingv1.PriorityClass{ObjectMeta: metav1.ObjectMeta{Name: priorityName}, Value: priorityVal}, metav1.CreateOptions{})
 				if err != nil {
-					framework.Logf("Failed to create priority '%v/%v': %v", priorityName, priorityVal, err)
-					framework.Logf("Reason: %v. Msg: %v", apierrors.ReasonForError(err), err)
+					framework.Logf("Failed to create priority '%v/%v'. Reason: %v. Msg: %v", priorityName, priorityVal, apierrors.ReasonForError(err), err)
 				}
 				framework.ExpectEqual(err == nil || apierrors.IsAlreadyExists(err), true)
 			}
@@ -651,6 +669,93 @@ var _ = SIGDescribe("SchedulerPreemption [Serial]", func() {
 			}
 		})
 	})
+
+	ginkgo.Context("PriorityClass endpoints", func() {
+		var cs clientset.Interface
+		f := framework.NewDefaultFramework("sched-preemption-path")
+		testUUID := uuid.New().String()
+		var pcs []*schedulingv1.PriorityClass
+
+		ginkgo.BeforeEach(func() {
+			cs = f.ClientSet
+			// Create 2 PriorityClass: p1, p2.
+			for i := 1; i <= 2; i++ {
+				name, val := fmt.Sprintf("p%d", i), int32(i)
+				pc, err := cs.SchedulingV1().PriorityClasses().Create(context.TODO(), &schedulingv1.PriorityClass{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"e2e": testUUID}}, Value: val}, metav1.CreateOptions{})
+				if err != nil {
+					framework.Logf("Failed to create priority '%v/%v'. Reason: %v. Msg: %v", name, val, apierrors.ReasonForError(err), err)
+				}
+				framework.ExpectEqual(err == nil || apierrors.IsAlreadyExists(err), true)
+				pcs = append(pcs, pc)
+			}
+		})
+
+		ginkgo.AfterEach(func() {
+			// Print out additional info if tests failed.
+			if ginkgo.CurrentGinkgoTestDescription().Failed {
+				// List existing PriorityClasses.
+				priorityList, err := cs.SchedulingV1().PriorityClasses().List(context.TODO(), metav1.ListOptions{})
+				if err != nil {
+					framework.Logf("Unable to list PriorityClasses: %v", err)
+				} else {
+					framework.Logf("List existing PriorityClasses:")
+					for _, p := range priorityList.Items {
+						framework.Logf("%v/%v created at %v", p.Name, p.Value, p.CreationTimestamp)
+					}
+				}
+			}
+
+			// Collection deletion on created PriorityClasses.
+			err := cs.SchedulingV1().PriorityClasses().DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{LabelSelector: fmt.Sprintf("e2e=%v", testUUID)})
+			framework.ExpectNoError(err)
+		})
+
+		/*
+			Release: v1.20
+			Testname: Scheduler, Verify PriorityClass endpoints
+			Description: Verify that PriorityClass endpoints can be listed. When any mutable field is
+			either patched or updated it MUST succeed. When any immutable field is either patched or
+			updated it MUST fail.
+		*/
+		framework.ConformanceIt("verify PriorityClass endpoints can be operated with different HTTP methods", func() {
+			// 1. Patch/Update on immutable fields will fail.
+			pcCopy := pcs[0].DeepCopy()
+			pcCopy.Value = pcCopy.Value * 10
+			err := patchPriorityClass(cs, pcs[0], pcCopy)
+			framework.ExpectError(err, "expect a patch error on an immutable field")
+			framework.Logf("%v", err)
+
+			pcCopy = pcs[1].DeepCopy()
+			pcCopy.Value = pcCopy.Value * 10
+			_, err = cs.SchedulingV1().PriorityClasses().Update(context.TODO(), pcCopy, metav1.UpdateOptions{})
+			framework.ExpectError(err, "expect an update error on an immutable field")
+			framework.Logf("%v", err)
+
+			// 2. Patch/Update on mutable fields will succeed.
+			newDesc := "updated description"
+			pcCopy = pcs[0].DeepCopy()
+			pcCopy.Description = newDesc
+			err = patchPriorityClass(cs, pcs[0], pcCopy)
+			framework.ExpectNoError(err)
+
+			pcCopy = pcs[1].DeepCopy()
+			pcCopy.Description = newDesc
+			_, err = cs.SchedulingV1().PriorityClasses().Update(context.TODO(), pcCopy, metav1.UpdateOptions{})
+			framework.ExpectNoError(err)
+
+			// 3. List existing PriorityClasses.
+			_, err = cs.SchedulingV1().PriorityClasses().List(context.TODO(), metav1.ListOptions{})
+			framework.ExpectNoError(err)
+
+			// 4. Verify fields of updated PriorityClasses.
+			for _, pc := range pcs {
+				livePC, err := cs.SchedulingV1().PriorityClasses().Get(context.TODO(), pc.Name, metav1.GetOptions{})
+				framework.ExpectNoError(err)
+				framework.ExpectEqual(livePC.Value, pc.Value)
+				framework.ExpectEqual(livePC.Description, newDesc)
+			}
+		})
+	})
 })
 
 type pauseRSConfig struct {
@@ -721,16 +826,38 @@ func waitForPreemptingWithTimeout(f *framework.Framework, pod *v1.Pod, timeout t
 	framework.ExpectNoError(err, "pod %v/%v failed to preempt other pods", pod.Namespace, pod.Name)
 }
 
-func getCurrentPodUsageOnTheNode(nodeName string, pods []v1.Pod, resource *v1.ResourceRequirements) (int64, int64) {
-	totalRequestedCPUResource := resource.Requests.Cpu().MilliValue()
-	totalRequestedMemResource := resource.Requests.Memory().Value()
-	for _, pod := range pods {
-		if pod.Spec.NodeName != nodeName || v1qos.GetPodQOS(&pod) == v1.PodQOSBestEffort {
-			continue
-		}
-		result := getNonZeroRequests(&pod)
-		totalRequestedCPUResource += result.MilliCPU
-		totalRequestedMemResource += result.Memory
+func patchNode(client clientset.Interface, old *v1.Node, new *v1.Node) error {
+	oldData, err := json.Marshal(old)
+	if err != nil {
+		return err
 	}
-	return totalRequestedCPUResource, totalRequestedMemResource
+
+	newData, err := json.Marshal(new)
+	if err != nil {
+		return err
+	}
+	patchBytes, err := strategicpatch.CreateTwoWayMergePatch(oldData, newData, &v1.Node{})
+	if err != nil {
+		return fmt.Errorf("failed to create merge patch for node %q: %v", old.Name, err)
+	}
+	_, err = client.CoreV1().Nodes().Patch(context.TODO(), old.Name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{}, "status")
+	return err
+}
+
+func patchPriorityClass(cs clientset.Interface, old, new *schedulingv1.PriorityClass) error {
+	oldData, err := json.Marshal(old)
+	if err != nil {
+		return err
+	}
+
+	newData, err := json.Marshal(new)
+	if err != nil {
+		return err
+	}
+	patchBytes, err := strategicpatch.CreateTwoWayMergePatch(oldData, newData, &schedulingv1.PriorityClass{})
+	if err != nil {
+		return fmt.Errorf("failed to create merge patch for PriorityClass %q: %v", old.Name, err)
+	}
+	_, err = cs.SchedulingV1().PriorityClasses().Patch(context.TODO(), old.Name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+	return err
 }

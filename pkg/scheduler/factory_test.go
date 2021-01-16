@@ -18,10 +18,8 @@ package scheduler
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"reflect"
-	"strings"
+	"fmt"
 	"testing"
 	"time"
 
@@ -29,35 +27,33 @@ import (
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/clock"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
-	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/events"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 	apicore "k8s.io/kubernetes/pkg/apis/core"
-	kubefeatures "k8s.io/kubernetes/pkg/features"
 	schedulerapi "k8s.io/kubernetes/pkg/scheduler/apis/config"
-	"k8s.io/kubernetes/pkg/scheduler/apis/config/scheme"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 	frameworkplugins "k8s.io/kubernetes/pkg/scheduler/framework/plugins"
-	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultbinder"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultpreemption"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/interpodaffinity"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodeaffinity"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodelabel"
-	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/queuesort"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/noderesources"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/podtopologyspread"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/serviceaffinity"
-	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/volumebinding"
+	frameworkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
 	internalcache "k8s.io/kubernetes/pkg/scheduler/internal/cache"
 	internalqueue "k8s.io/kubernetes/pkg/scheduler/internal/queue"
 	"k8s.io/kubernetes/pkg/scheduler/profile"
 )
 
 const (
-	disablePodPreemption             = false
-	bindTimeoutSeconds               = 600
 	podInitialBackoffDurationSeconds = 1
 	podMaxBackoffDurationSeconds     = 10
 	testSchedulerName                = "test-scheduler"
@@ -73,374 +69,533 @@ func TestCreate(t *testing.T) {
 	}
 }
 
-// Test configures a scheduler from a policies defined in a file
+// createAlgorithmSourceFromPolicy creates the schedulerAlgorithmSource from policy string
+func createAlgorithmSourceFromPolicy(configData []byte, clientSet clientset.Interface) schedulerapi.SchedulerAlgorithmSource {
+	configPolicyName := "scheduler-custom-policy-config"
+	policyConfigMap := v1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{Namespace: metav1.NamespaceSystem, Name: configPolicyName},
+		Data:       map[string]string{schedulerapi.SchedulerPolicyConfigMapKey: string(configData)},
+	}
+
+	clientSet.CoreV1().ConfigMaps(metav1.NamespaceSystem).Create(context.TODO(), &policyConfigMap, metav1.CreateOptions{})
+
+	return schedulerapi.SchedulerAlgorithmSource{
+		Policy: &schedulerapi.SchedulerPolicySource{
+			ConfigMap: &schedulerapi.SchedulerPolicyConfigMapSource{
+				Namespace: policyConfigMap.Namespace,
+				Name:      policyConfigMap.Name,
+			},
+		},
+	}
+}
+
+// TestCreateFromConfig configures a scheduler from policies defined in a configMap.
 // It combines some configurable predicate/priorities with some pre-defined ones
 func TestCreateFromConfig(t *testing.T) {
-	var configData []byte
-
-	configData = []byte(`{
-		"kind" : "Policy",
-		"apiVersion" : "v1",
-		"predicates" : [
-			{"name" : "TestZoneAffinity", "argument" : {"serviceAffinity" : {"labels" : ["zone"]}}},
-			{"name" : "TestZoneAffinity", "argument" : {"serviceAffinity" : {"labels" : ["foo"]}}},
-			{"name" : "TestRequireZone", "argument" : {"labelsPresence" : {"labels" : ["zone"], "presence" : true}}},
-			{"name" : "TestNoFooLabel", "argument" : {"labelsPresence" : {"labels" : ["foo"], "presence" : false}}},
-			{"name" : "PodFitsResources"},
-			{"name" : "PodFitsHostPorts"}
-		],
-		"priorities" : [
-			{"name" : "RackSpread", "weight" : 3, "argument" : {"serviceAntiAffinity" : {"label" : "rack"}}},
-			{"name" : "ZoneSpread", "weight" : 3, "argument" : {"serviceAntiAffinity" : {"label" : "zone"}}},
-			{"name" : "LabelPreference1", "weight" : 3, "argument" : {"labelPreference" : {"label" : "l1", "presence": true}}},
-			{"name" : "LabelPreference2", "weight" : 3, "argument" : {"labelPreference" : {"label" : "l2", "presence": false}}},
-			{"name" : "NodeAffinityPriority", "weight" : 2},
-			{"name" : "ImageLocalityPriority", "weight" : 1}		]
-	}`)
-	cases := []struct {
-		name       string
-		plugins    *schedulerapi.Plugins
-		pluginCfgs []schedulerapi.PluginConfig
-		wantErr    string
+	testcases := []struct {
+		name             string
+		configData       []byte
+		wantPluginConfig []schedulerapi.PluginConfig
+		wantPlugins      *schedulerapi.Plugins
 	}{
+
 		{
-			name: "just policy",
-		},
-		{
-			name: "policy and plugins",
-			plugins: &schedulerapi.Plugins{
-				Filter: &schedulerapi.PluginSet{
-					Disabled: []schedulerapi.Plugin{{Name: nodelabel.Name}},
+			name: "policy with unspecified predicates or priorities uses default",
+			configData: []byte(`{
+				"kind" : "Policy",
+				"apiVersion" : "v1"
+			}`),
+			wantPluginConfig: []schedulerapi.PluginConfig{
+				{
+					Name: defaultpreemption.Name,
+					Args: &schedulerapi.DefaultPreemptionArgs{
+						MinCandidateNodesPercentage: 10,
+						MinCandidateNodesAbsolute:   100,
+					},
+				},
+				{
+					Name: interpodaffinity.Name,
+					Args: &schedulerapi.InterPodAffinityArgs{
+						HardPodAffinityWeight: 1,
+					},
+				},
+				{
+					Name: nodeaffinity.Name,
+					Args: &schedulerapi.NodeAffinityArgs{},
+				},
+				{
+					Name: noderesources.FitName,
+					Args: &schedulerapi.NodeResourcesFitArgs{},
+				},
+				{
+					Name: noderesources.LeastAllocatedName,
+					Args: &schedulerapi.NodeResourcesLeastAllocatedArgs{
+						Resources: []schedulerapi.ResourceSpec{
+							{Name: "cpu", Weight: 1},
+							{Name: "memory", Weight: 1},
+						},
+					},
+				},
+				{
+					Name: podtopologyspread.Name,
+					Args: &schedulerapi.PodTopologySpreadArgs{DefaultingType: schedulerapi.SystemDefaulting},
+				},
+				{
+					Name: volumebinding.Name,
+					Args: &schedulerapi.VolumeBindingArgs{
+						BindTimeoutSeconds: 600,
+					},
 				},
 			},
-			wantErr: "using Plugins and Policy simultaneously is not supported",
+			wantPlugins: &schedulerapi.Plugins{
+				QueueSort: &schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "PrioritySort"}}},
+				PreFilter: &schedulerapi.PluginSet{
+					Enabled: []schedulerapi.Plugin{
+						{Name: "NodeResourcesFit"},
+						{Name: "NodePorts"},
+						{Name: "VolumeBinding"},
+						{Name: "PodTopologySpread"},
+						{Name: "InterPodAffinity"},
+					},
+				},
+				Filter: &schedulerapi.PluginSet{
+					Enabled: []schedulerapi.Plugin{
+						{Name: "NodeUnschedulable"},
+						{Name: "NodeResourcesFit"},
+						{Name: "NodeName"},
+						{Name: "NodePorts"},
+						{Name: "NodeAffinity"},
+						{Name: "VolumeRestrictions"},
+						{Name: "TaintToleration"},
+						{Name: "EBSLimits"},
+						{Name: "GCEPDLimits"},
+						{Name: "NodeVolumeLimits"},
+						{Name: "AzureDiskLimits"},
+						{Name: "VolumeBinding"},
+						{Name: "VolumeZone"},
+						{Name: "PodTopologySpread"},
+						{Name: "InterPodAffinity"},
+					},
+				},
+				PostFilter: &schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "DefaultPreemption"}}},
+				PreScore: &schedulerapi.PluginSet{
+					Enabled: []schedulerapi.Plugin{
+						{Name: "PodTopologySpread"},
+						{Name: "InterPodAffinity"},
+						{Name: "NodeAffinity"},
+						{Name: "TaintToleration"},
+					},
+				},
+				Score: &schedulerapi.PluginSet{
+					Enabled: []schedulerapi.Plugin{
+						{Name: "NodeResourcesBalancedAllocation", Weight: 1},
+						{Name: "PodTopologySpread", Weight: 2},
+						{Name: "ImageLocality", Weight: 1},
+						{Name: "InterPodAffinity", Weight: 1},
+						{Name: "NodeResourcesLeastAllocated", Weight: 1},
+						{Name: "NodeAffinity", Weight: 1},
+						{Name: "NodePreferAvoidPods", Weight: 10000},
+						{Name: "TaintToleration", Weight: 1},
+					},
+				},
+				Reserve:  &schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "VolumeBinding"}}},
+				Permit:   &schedulerapi.PluginSet{},
+				PreBind:  &schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "VolumeBinding"}}},
+				Bind:     &schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "DefaultBinder"}}},
+				PostBind: &schedulerapi.PluginSet{},
+			},
 		},
 		{
-			name: "policy and plugin config",
-			pluginCfgs: []schedulerapi.PluginConfig{
-				{Name: queuesort.Name},
+			name: "policy with arguments",
+			configData: []byte(`{
+				"kind" : "Policy",
+				"apiVersion" : "v1",
+				"predicates" : [
+					{"name" : "TestZoneAffinity", "argument" : {"serviceAffinity" : {"labels" : ["zone"]}}},
+					{"name" : "TestZoneAffinity", "argument" : {"serviceAffinity" : {"labels" : ["foo"]}}},
+					{"name" : "TestRequireZone", "argument" : {"labelsPresence" : {"labels" : ["zone"], "presence" : true}}},
+					{"name" : "TestNoFooLabel", "argument" : {"labelsPresence" : {"labels" : ["foo"], "presence" : false}}}
+				],
+				"priorities" : [
+					{"name" : "RackSpread", "weight" : 3, "argument" : {"serviceAntiAffinity" : {"label" : "rack"}}},
+					{"name" : "ZoneSpread", "weight" : 3, "argument" : {"serviceAntiAffinity" : {"label" : "zone"}}},
+					{
+						"name": "RequestedToCapacityRatioPriority",
+						"weight": 2,
+						"argument": {
+							"requestedToCapacityRatioArguments": {
+								"shape": [
+									{"utilization": 0,  "score": 0},
+									{"utilization": 50, "score": 7}
+								]
+							}
+						}
+					},
+					{"name" : "LabelPreference1", "weight" : 3, "argument" : {"labelPreference" : {"label" : "l1", "presence": true}}},
+					{"name" : "LabelPreference2", "weight" : 3, "argument" : {"labelPreference" : {"label" : "l2", "presence": false}}},
+					{"name" : "NodeAffinityPriority", "weight" : 2},
+					{"name" : "InterPodAffinityPriority", "weight" : 1}
+				]
+			}`),
+			wantPluginConfig: []schedulerapi.PluginConfig{
+				{
+					Name: defaultpreemption.Name,
+					Args: &schedulerapi.DefaultPreemptionArgs{
+						MinCandidateNodesPercentage: 10,
+						MinCandidateNodesAbsolute:   100,
+					},
+				},
+				{
+					Name: interpodaffinity.Name,
+					Args: &schedulerapi.InterPodAffinityArgs{
+						HardPodAffinityWeight: 1,
+					},
+				},
+				{
+					Name: nodeaffinity.Name,
+					Args: &schedulerapi.NodeAffinityArgs{},
+				},
+				{
+					Name: nodelabel.Name,
+					Args: &schedulerapi.NodeLabelArgs{
+						PresentLabels:           []string{"zone"},
+						AbsentLabels:            []string{"foo"},
+						PresentLabelsPreference: []string{"l1"},
+						AbsentLabelsPreference:  []string{"l2"},
+					},
+				},
+				{
+					Name: noderesources.RequestedToCapacityRatioName,
+					Args: &schedulerapi.RequestedToCapacityRatioArgs{
+						Shape: []schedulerapi.UtilizationShapePoint{
+							{Utilization: 0, Score: 0},
+							{Utilization: 50, Score: 7},
+						},
+						Resources: []schedulerapi.ResourceSpec{},
+					},
+				},
+				{
+					Name: serviceaffinity.Name,
+					Args: &schedulerapi.ServiceAffinityArgs{
+						AffinityLabels:               []string{"zone", "foo"},
+						AntiAffinityLabelsPreference: []string{"rack", "zone"},
+					},
+				},
 			},
-			wantErr: "using PluginConfig and Policy simultaneously is not supported",
+			wantPlugins: &schedulerapi.Plugins{
+				QueueSort: &schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "PrioritySort"}}},
+				PreFilter: &schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "ServiceAffinity"}}},
+				Filter: &schedulerapi.PluginSet{
+					Enabled: []schedulerapi.Plugin{
+						{Name: "NodeUnschedulable"},
+						{Name: "TaintToleration"},
+						{Name: "NodeLabel"},
+						{Name: "ServiceAffinity"},
+					},
+				},
+				PostFilter: &schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "DefaultPreemption"}}},
+				PreScore: &schedulerapi.PluginSet{
+					Enabled: []schedulerapi.Plugin{
+						{Name: "InterPodAffinity"},
+						{Name: "NodeAffinity"},
+					},
+				},
+				Score: &schedulerapi.PluginSet{
+					Enabled: []schedulerapi.Plugin{
+						{Name: "InterPodAffinity", Weight: 1},
+						{Name: "NodeAffinity", Weight: 2},
+						{Name: "NodeLabel", Weight: 6},
+						{Name: "RequestedToCapacityRatio", Weight: 2},
+						{Name: "ServiceAffinity", Weight: 6},
+					},
+				},
+				Reserve:  &schedulerapi.PluginSet{},
+				Permit:   &schedulerapi.PluginSet{},
+				PreBind:  &schedulerapi.PluginSet{},
+				Bind:     &schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "DefaultBinder"}}},
+				PostBind: &schedulerapi.PluginSet{},
+			},
+		},
+		{
+			name: "policy with HardPodAffinitySymmetricWeight argument",
+			configData: []byte(`{
+				"kind" : "Policy",
+				"apiVersion" : "v1",
+				"predicates" : [
+					{"name" : "PodFitsResources"},
+					{"name" : "PodFitsHostPorts"}
+				],
+				"priorities" : [
+					{"name" : "InterPodAffinityPriority", "weight" : 1}
+				],
+				"hardPodAffinitySymmetricWeight" : 10
+			}`),
+			wantPluginConfig: []schedulerapi.PluginConfig{
+				{
+					Name: defaultpreemption.Name,
+					Args: &schedulerapi.DefaultPreemptionArgs{
+						MinCandidateNodesPercentage: 10,
+						MinCandidateNodesAbsolute:   100,
+					},
+				},
+				{
+					Name: interpodaffinity.Name,
+					Args: &schedulerapi.InterPodAffinityArgs{
+						HardPodAffinityWeight: 10,
+					},
+				},
+				{
+					Name: "NodeResourcesFit",
+					Args: &schedulerapi.NodeResourcesFitArgs{},
+				},
+			},
+			wantPlugins: &schedulerapi.Plugins{
+				QueueSort: &schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "PrioritySort"}}},
+				PreFilter: &schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{
+					{Name: "NodePorts"},
+					{Name: "NodeResourcesFit"},
+				}},
+				Filter: &schedulerapi.PluginSet{
+					Enabled: []schedulerapi.Plugin{
+						{Name: "NodeUnschedulable"},
+						{Name: "NodePorts"},
+						{Name: "NodeResourcesFit"},
+						{Name: "TaintToleration"},
+					},
+				},
+				PostFilter: &schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "DefaultPreemption"}}},
+				PreScore: &schedulerapi.PluginSet{
+					Enabled: []schedulerapi.Plugin{
+						{Name: "InterPodAffinity"},
+					},
+				},
+				Score: &schedulerapi.PluginSet{
+					Enabled: []schedulerapi.Plugin{
+						{Name: "InterPodAffinity", Weight: 1},
+					},
+				},
+				Reserve:  &schedulerapi.PluginSet{},
+				Permit:   &schedulerapi.PluginSet{},
+				PreBind:  &schedulerapi.PluginSet{},
+				Bind:     &schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "DefaultBinder"}}},
+				PostBind: &schedulerapi.PluginSet{},
+			},
 		},
 	}
-	for _, tc := range cases {
+	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
 			client := fake.NewSimpleClientset()
-			stopCh := make(chan struct{})
-			defer close(stopCh)
-			factory := newConfigFactory(client, stopCh)
-			factory.profiles[0].Plugins = tc.plugins
-			factory.profiles[0].PluginConfig = tc.pluginCfgs
 
-			var policy schedulerapi.Policy
-			if err := runtime.DecodeInto(scheme.Codecs.UniversalDecoder(), configData, &policy); err != nil {
-				t.Errorf("Invalid configuration: %v", err)
-			}
+			informerFactory := informers.NewSharedInformerFactory(client, 0)
+			recorderFactory := profile.NewRecorderFactory(events.NewBroadcaster(&events.EventSinkImpl{Interface: client.EventsV1()}))
 
-			sched, err := factory.createFromConfig(policy)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Errorf("got err %q, want %q", err, tc.wantErr)
-				}
-				return
-			}
+			_, err := New(
+				client,
+				informerFactory,
+				recorderFactory,
+				make(chan struct{}),
+				WithAlgorithmSource(createAlgorithmSourceFromPolicy(tc.configData, client)),
+				WithBuildFrameworkCapturer(func(p schedulerapi.KubeSchedulerProfile) {
+					if p.SchedulerName != v1.DefaultSchedulerName {
+						t.Errorf("unexpected scheduler name: want %q, got %q", v1.DefaultSchedulerName, p.SchedulerName)
+					}
+
+					if diff := cmp.Diff(tc.wantPluginConfig, p.PluginConfig); diff != "" {
+						t.Errorf("unexpected plugins config diff (-want, +got): %s", diff)
+					}
+
+					if diff := cmp.Diff(tc.wantPlugins, p.Plugins); diff != "" {
+						t.Errorf("unexpected plugins diff (-want, +got): %s", diff)
+					}
+				}),
+			)
+
 			if err != nil {
-				t.Fatalf("createFromConfig failed: %v", err)
+				t.Fatalf("Error constructing: %v", err)
 			}
-			// createFromConfig is the old codepath where we only have one profile.
-			prof := sched.Profiles[testSchedulerName]
-			queueSortPls := prof.ListPlugins()["QueueSortPlugin"]
-			wantQueuePls := []schedulerapi.Plugin{{Name: queuesort.Name}}
-			if diff := cmp.Diff(wantQueuePls, queueSortPls); diff != "" {
-				t.Errorf("Unexpected QueueSort plugins (-want, +got): %s", diff)
-			}
-			bindPls := prof.ListPlugins()["BindPlugin"]
-			wantBindPls := []schedulerapi.Plugin{{Name: defaultbinder.Name}}
-			if diff := cmp.Diff(wantBindPls, bindPls); diff != "" {
-				t.Errorf("Unexpected Bind plugins (-want, +got): %s", diff)
-			}
-
-			// Verify that node label predicate/priority are converted to framework plugins.
-			wantArgs := `{"Name":"NodeLabel","Args":{"presentLabels":["zone"],"absentLabels":["foo"],"presentLabelsPreference":["l1"],"absentLabelsPreference":["l2"]}}`
-			verifyPluginConvertion(t, nodelabel.Name, []string{"FilterPlugin", "ScorePlugin"}, prof, &factory.profiles[0], 6, wantArgs)
-			// Verify that service affinity custom predicate/priority is converted to framework plugin.
-			wantArgs = `{"Name":"ServiceAffinity","Args":{"affinityLabels":["zone","foo"],"antiAffinityLabelsPreference":["rack","zone"]}}`
-			verifyPluginConvertion(t, serviceaffinity.Name, []string{"FilterPlugin", "ScorePlugin"}, prof, &factory.profiles[0], 6, wantArgs)
-			// TODO(#87703): Verify all plugin configs.
 		})
-	}
-
-}
-
-func verifyPluginConvertion(t *testing.T, name string, extentionPoints []string, prof *profile.Profile, cfg *schedulerapi.KubeSchedulerProfile, wantWeight int32, wantArgs string) {
-	for _, extensionPoint := range extentionPoints {
-		plugin, ok := findPlugin(name, extensionPoint, prof)
-		if !ok {
-			t.Fatalf("%q plugin does not exist in framework.", name)
-		}
-		if extensionPoint == "ScorePlugin" {
-			if plugin.Weight != wantWeight {
-				t.Errorf("Wrong weight. Got: %v, want: %v", plugin.Weight, wantWeight)
-			}
-		}
-		// Verify that the policy config is converted to plugin config.
-		pluginConfig := findPluginConfig(name, cfg)
-		encoding, err := json.Marshal(pluginConfig)
-		if err != nil {
-			t.Errorf("Failed to marshal %+v: %v", pluginConfig, err)
-		}
-		if string(encoding) != wantArgs {
-			t.Errorf("Config for %v plugin mismatch. got: %v, want: %v", name, string(encoding), wantArgs)
-		}
-	}
-}
-
-func findPlugin(name, extensionPoint string, prof *profile.Profile) (schedulerapi.Plugin, bool) {
-	for _, pl := range prof.ListPlugins()[extensionPoint] {
-		if pl.Name == name {
-			return pl, true
-		}
-	}
-	return schedulerapi.Plugin{}, false
-}
-
-func findPluginConfig(name string, prof *schedulerapi.KubeSchedulerProfile) schedulerapi.PluginConfig {
-	for _, c := range prof.PluginConfig {
-		if c.Name == name {
-			return c
-		}
-	}
-	return schedulerapi.PluginConfig{}
-}
-
-func TestCreateFromConfigWithHardPodAffinitySymmetricWeight(t *testing.T) {
-	var configData []byte
-	var policy schedulerapi.Policy
-
-	client := fake.NewSimpleClientset()
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-	factory := newConfigFactory(client, stopCh)
-
-	configData = []byte(`{
-		"kind" : "Policy",
-		"apiVersion" : "v1",
-		"predicates" : [
-			{"name" : "TestZoneAffinity", "argument" : {"serviceAffinity" : {"labels" : ["zone"]}}},
-			{"name" : "TestRequireZone", "argument" : {"labelsPresence" : {"labels" : ["zone"], "presence" : true}}},
-			{"name" : "PodFitsResources"},
-			{"name" : "PodFitsHostPorts"}
-		],
-		"priorities" : [
-			{"name" : "RackSpread", "weight" : 3, "argument" : {"serviceAntiAffinity" : {"label" : "rack"}}},
-			{"name" : "NodeAffinityPriority", "weight" : 2},
-			{"name" : "ImageLocalityPriority", "weight" : 1},
-			{"name" : "InterPodAffinityPriority", "weight" : 1}
-		],
-		"hardPodAffinitySymmetricWeight" : 10
-	}`)
-	if err := runtime.DecodeInto(scheme.Codecs.UniversalDecoder(), configData, &policy); err != nil {
-		t.Fatalf("Invalid configuration: %v", err)
-	}
-	if _, err := factory.createFromConfig(policy); err != nil {
-		t.Fatal(err)
-	}
-	// TODO(#87703): Verify that the entire pluginConfig is correct.
-	foundAffinityCfg := false
-	for _, cfg := range factory.profiles[0].PluginConfig {
-		if cfg.Name == interpodaffinity.Name {
-			foundAffinityCfg = true
-			wantArgs := &runtime.Unknown{Raw: []byte(`{"hardPodAffinityWeight":10}`)}
-
-			if diff := cmp.Diff(wantArgs, cfg.Args); diff != "" {
-				t.Errorf("wrong InterPodAffinity args (-want, +got): %s", diff)
-			}
-		}
-	}
-	if !foundAffinityCfg {
-		t.Errorf("args for InterPodAffinity were not found")
-	}
-}
-
-func TestCreateFromEmptyConfig(t *testing.T) {
-	var configData []byte
-	var policy schedulerapi.Policy
-
-	client := fake.NewSimpleClientset()
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-	factory := newConfigFactory(client, stopCh)
-
-	configData = []byte(`{}`)
-	if err := runtime.DecodeInto(scheme.Codecs.UniversalDecoder(), configData, &policy); err != nil {
-		t.Errorf("Invalid configuration: %v", err)
-	}
-
-	if _, err := factory.createFromConfig(policy); err != nil {
-		t.Fatal(err)
-	}
-	prof := factory.profiles[0]
-	if len(prof.PluginConfig) != 0 {
-		t.Errorf("got plugin config %s, want none", prof.PluginConfig)
-	}
-}
-
-// Test configures a scheduler from a policy that does not specify any
-// predicate/priority.
-// The predicate/priority from DefaultProvider will be used.
-func TestCreateFromConfigWithUnspecifiedPredicatesOrPriorities(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-	factory := newConfigFactory(client, stopCh)
-
-	configData := []byte(`{
-		"kind" : "Policy",
-		"apiVersion" : "v1"
-	}`)
-	var policy schedulerapi.Policy
-	if err := runtime.DecodeInto(scheme.Codecs.UniversalDecoder(), configData, &policy); err != nil {
-		t.Fatalf("Invalid configuration: %v", err)
-	}
-
-	sched, err := factory.createFromConfig(policy)
-	if err != nil {
-		t.Fatalf("Failed to create scheduler from configuration: %v", err)
-	}
-	if _, exist := findPlugin("NodeResourcesFit", "FilterPlugin", sched.Profiles[testSchedulerName]); !exist {
-		t.Errorf("Expected plugin NodeResourcesFit")
 	}
 }
 
 func TestDefaultErrorFunc(t *testing.T) {
-	grace := int64(30)
-	testPod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "bar"},
-		Spec: v1.PodSpec{
-			RestartPolicy:                 v1.RestartPolicyAlways,
-			DNSPolicy:                     v1.DNSClusterFirst,
-			TerminationGracePeriodSeconds: &grace,
-			SecurityContext:               &v1.PodSecurityContext{},
+	testPod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"}}
+	testPodUpdated := testPod.DeepCopy()
+	testPodUpdated.Labels = map[string]string{"foo": ""}
+
+	tests := []struct {
+		name                       string
+		injectErr                  error
+		podUpdatedDuringScheduling bool // pod is updated during a scheduling cycle
+		podDeletedDuringScheduling bool // pod is deleted during a scheduling cycle
+		expect                     *v1.Pod
+	}{
+		{
+			name:                       "pod is updated during a scheduling cycle",
+			injectErr:                  nil,
+			podUpdatedDuringScheduling: true,
+			expect:                     testPodUpdated,
+		},
+		{
+			name:      "pod is not updated during a scheduling cycle",
+			injectErr: nil,
+			expect:    testPod,
+		},
+		{
+			name:                       "pod is deleted during a scheduling cycle",
+			injectErr:                  nil,
+			podDeletedDuringScheduling: true,
+			expect:                     nil,
 		},
 	}
 
-	nodeBar, nodeFoo :=
-		&v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "bar"}},
-		&v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "foo"}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stopCh := make(chan struct{})
+			defer close(stopCh)
 
-	testPodInfo := &framework.QueuedPodInfo{Pod: testPod}
-	client := fake.NewSimpleClientset(&v1.PodList{Items: []v1.Pod{*testPod}}, &v1.NodeList{Items: []v1.Node{*nodeBar}})
-	stopCh := make(chan struct{})
-	defer close(stopCh)
+			client := fake.NewSimpleClientset(&v1.PodList{Items: []v1.Pod{*testPod}})
+			informerFactory := informers.NewSharedInformerFactory(client, 0)
+			podInformer := informerFactory.Core().V1().Pods()
+			// Need to add/update/delete testPod to the store.
+			podInformer.Informer().GetStore().Add(testPod)
 
-	timestamp := time.Now()
-	queue := internalqueue.NewPriorityQueue(nil, internalqueue.WithClock(clock.NewFakeClock(timestamp)))
-	schedulerCache := internalcache.New(30*time.Second, stopCh)
-	errFunc := MakeDefaultErrorFunc(client, queue, schedulerCache)
+			queue := internalqueue.NewPriorityQueue(nil, internalqueue.WithClock(clock.NewFakeClock(time.Now())))
+			schedulerCache := internalcache.New(30*time.Second, stopCh)
 
-	_ = schedulerCache.AddNode(nodeFoo)
+			queue.Add(testPod)
+			queue.Pop()
 
-	// assume nodeFoo was not found
-	err := apierrors.NewNotFound(apicore.Resource("node"), nodeFoo.Name)
-	errFunc(testPodInfo, err)
-	dump := schedulerCache.Dump()
-	for _, n := range dump.Nodes {
-		if e, a := nodeFoo, n.Node(); reflect.DeepEqual(e, a) {
-			t.Errorf("Node %s is still in schedulerCache", e.Name)
-			break
-		}
-	}
+			if tt.podUpdatedDuringScheduling {
+				podInformer.Informer().GetStore().Update(testPodUpdated)
+				queue.Update(testPod, testPodUpdated)
+			}
+			if tt.podDeletedDuringScheduling {
+				podInformer.Informer().GetStore().Delete(testPod)
+				queue.Delete(testPod)
+			}
 
-	// Try up to a minute to retrieve the error pod from priority queue
-	foundPodFlag := false
-	maxIterations := 10 * 60
-	for i := 0; i < maxIterations; i++ {
-		time.Sleep(100 * time.Millisecond)
-		got := getPodfromPriorityQueue(queue, testPod)
-		if got == nil {
-			continue
-		}
+			testPodInfo := &framework.QueuedPodInfo{Pod: testPod}
+			errFunc := MakeDefaultErrorFunc(client, podInformer.Lister(), queue, schedulerCache)
+			errFunc(testPodInfo, tt.injectErr)
 
-		testClientGetPodRequest(client, t, testPod.Namespace, testPod.Name)
+			var got *v1.Pod
+			if tt.podUpdatedDuringScheduling {
+				head, e := queue.Pop()
+				if e != nil {
+					t.Fatalf("Cannot pop pod from the activeQ: %v", e)
+				}
+				got = head.Pod
+			} else {
+				got = getPodFromPriorityQueue(queue, testPod)
+			}
 
-		if e, a := testPod, got; !reflect.DeepEqual(e, a) {
-			t.Errorf("Expected %v, got %v", e, a)
-		}
-
-		foundPodFlag = true
-		break
-	}
-
-	if !foundPodFlag {
-		t.Errorf("Failed to get pod from the unschedulable queue after waiting for a minute: %v", testPod)
-	}
-
-	_ = queue.Delete(testPod)
-
-	// Trigger error handling again to put the pod in unschedulable queue
-	errFunc(testPodInfo, nil)
-
-	// Try up to a minute to retrieve the error pod from priority queue
-	foundPodFlag = false
-	maxIterations = 10 * 60
-	for i := 0; i < maxIterations; i++ {
-		time.Sleep(100 * time.Millisecond)
-		got := getPodfromPriorityQueue(queue, testPod)
-		if got == nil {
-			continue
-		}
-
-		testClientGetPodRequest(client, t, testPod.Namespace, testPod.Name)
-
-		if e, a := testPod, got; !reflect.DeepEqual(e, a) {
-			t.Errorf("Expected %v, got %v", e, a)
-		}
-
-		foundPodFlag = true
-		break
-	}
-
-	if !foundPodFlag {
-		t.Errorf("Failed to get pod from the unschedulable queue after waiting for a minute: %v", testPod)
-	}
-
-	// Remove the pod from priority queue to test putting error
-	// pod in backoff queue.
-	queue.Delete(testPod)
-
-	// Trigger a move request
-	queue.MoveAllToActiveOrBackoffQueue("test")
-
-	// Trigger error handling again to put the pod in backoff queue
-	errFunc(testPodInfo, nil)
-
-	foundPodFlag = false
-	for i := 0; i < maxIterations; i++ {
-		time.Sleep(100 * time.Millisecond)
-		// The pod should be found from backoff queue at this time
-		got := getPodfromPriorityQueue(queue, testPod)
-		if got == nil {
-			continue
-		}
-
-		testClientGetPodRequest(client, t, testPod.Namespace, testPod.Name)
-
-		if e, a := testPod, got; !reflect.DeepEqual(e, a) {
-			t.Errorf("Expected %v, got %v", e, a)
-		}
-
-		foundPodFlag = true
-		break
-	}
-
-	if !foundPodFlag {
-		t.Errorf("Failed to get pod from the backoff queue after waiting for a minute: %v", testPod)
+			if diff := cmp.Diff(tt.expect, got); diff != "" {
+				t.Errorf("Unexpected pod (-want, +got): %s", diff)
+			}
+		})
 	}
 }
 
-// getPodfromPriorityQueue is the function used in the TestDefaultErrorFunc test to get
+func TestDefaultErrorFunc_NodeNotFound(t *testing.T) {
+	nodeFoo := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "foo"}}
+	nodeBar := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "bar"}}
+	testPod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"}}
+	tests := []struct {
+		name             string
+		nodes            []v1.Node
+		nodeNameToDelete string
+		injectErr        error
+		expectNodeNames  sets.String
+	}{
+		{
+			name:             "node is deleted during a scheduling cycle",
+			nodes:            []v1.Node{*nodeFoo, *nodeBar},
+			nodeNameToDelete: "foo",
+			injectErr:        apierrors.NewNotFound(apicore.Resource("node"), nodeFoo.Name),
+			expectNodeNames:  sets.NewString("bar"),
+		},
+		{
+			name:            "node is not deleted but NodeNotFound is received incorrectly",
+			nodes:           []v1.Node{*nodeFoo, *nodeBar},
+			injectErr:       apierrors.NewNotFound(apicore.Resource("node"), nodeFoo.Name),
+			expectNodeNames: sets.NewString("foo", "bar"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stopCh := make(chan struct{})
+			defer close(stopCh)
+
+			client := fake.NewSimpleClientset(&v1.PodList{Items: []v1.Pod{*testPod}}, &v1.NodeList{Items: tt.nodes})
+			informerFactory := informers.NewSharedInformerFactory(client, 0)
+			podInformer := informerFactory.Core().V1().Pods()
+			// Need to add testPod to the store.
+			podInformer.Informer().GetStore().Add(testPod)
+
+			queue := internalqueue.NewPriorityQueue(nil, internalqueue.WithClock(clock.NewFakeClock(time.Now())))
+			schedulerCache := internalcache.New(30*time.Second, stopCh)
+
+			for i := range tt.nodes {
+				node := tt.nodes[i]
+				// Add node to schedulerCache no matter it's deleted in API server or not.
+				schedulerCache.AddNode(&node)
+				if node.Name == tt.nodeNameToDelete {
+					client.CoreV1().Nodes().Delete(context.TODO(), node.Name, metav1.DeleteOptions{})
+				}
+			}
+
+			testPodInfo := &framework.QueuedPodInfo{Pod: testPod}
+			errFunc := MakeDefaultErrorFunc(client, podInformer.Lister(), queue, schedulerCache)
+			errFunc(testPodInfo, tt.injectErr)
+
+			gotNodes := schedulerCache.Dump().Nodes
+			gotNodeNames := sets.NewString()
+			for _, nodeInfo := range gotNodes {
+				gotNodeNames.Insert(nodeInfo.Node().Name)
+			}
+			if diff := cmp.Diff(tt.expectNodeNames, gotNodeNames); diff != "" {
+				t.Errorf("Unexpected nodes (-want, +got): %s", diff)
+			}
+		})
+	}
+}
+
+func TestDefaultErrorFunc_PodAlreadyBound(t *testing.T) {
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	nodeFoo := v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "foo"}}
+	testPod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"}, Spec: v1.PodSpec{NodeName: "foo"}}
+
+	client := fake.NewSimpleClientset(&v1.PodList{Items: []v1.Pod{*testPod}}, &v1.NodeList{Items: []v1.Node{nodeFoo}})
+	informerFactory := informers.NewSharedInformerFactory(client, 0)
+	podInformer := informerFactory.Core().V1().Pods()
+	// Need to add testPod to the store.
+	podInformer.Informer().GetStore().Add(testPod)
+
+	queue := internalqueue.NewPriorityQueue(nil, internalqueue.WithClock(clock.NewFakeClock(time.Now())))
+	schedulerCache := internalcache.New(30*time.Second, stopCh)
+
+	// Add node to schedulerCache no matter it's deleted in API server or not.
+	schedulerCache.AddNode(&nodeFoo)
+
+	testPodInfo := &framework.QueuedPodInfo{Pod: testPod}
+	errFunc := MakeDefaultErrorFunc(client, podInformer.Lister(), queue, schedulerCache)
+	errFunc(testPodInfo, fmt.Errorf("binding rejected: timeout"))
+
+	pod := getPodFromPriorityQueue(queue, testPod)
+	if pod != nil {
+		t.Fatalf("Unexpected pod: %v should not be in PriorityQueue when the NodeName of pod is not empty", pod.Name)
+	}
+}
+
+// getPodFromPriorityQueue is the function used in the TestDefaultErrorFunc test to get
 // the specific pod from the given priority queue. It returns the found pod in the priority queue.
-func getPodfromPriorityQueue(queue *internalqueue.PriorityQueue, pod *v1.Pod) *v1.Pod {
+func getPodFromPriorityQueue(queue *internalqueue.PriorityQueue, pod *v1.Pod) *v1.Pod {
 	podList := queue.PendingPods()
 	if len(podList) == 0 {
 		return nil
@@ -465,50 +620,19 @@ func getPodfromPriorityQueue(queue *internalqueue.PriorityQueue, pod *v1.Pod) *v
 	return nil
 }
 
-// testClientGetPodRequest function provides a routine used by TestDefaultErrorFunc test.
-// It tests whether the fake client can receive request and correctly "get" the namespace
-// and name of the error pod.
-func testClientGetPodRequest(client *fake.Clientset, t *testing.T, podNs string, podName string) {
-	requestReceived := false
-	actions := client.Actions()
-	for _, a := range actions {
-		if a.GetVerb() == "get" && a.GetResource().Resource == "pods" {
-			getAction, ok := a.(clienttesting.GetAction)
-			if !ok {
-				t.Errorf("Can't cast action object to GetAction interface")
-				break
-			}
-			name := getAction.GetName()
-			ns := a.GetNamespace()
-			if name != podName || ns != podNs {
-				t.Errorf("Expected name %s namespace %s, got %s %s",
-					podName, podNs, name, ns)
-			}
-			requestReceived = true
-		}
-	}
-	if !requestReceived {
-		t.Errorf("Get pod request not received")
-	}
-}
-
 func newConfigFactoryWithFrameworkRegistry(
 	client clientset.Interface, stopCh <-chan struct{},
-	registry framework.Registry) *Configurator {
+	registry frameworkruntime.Registry) *Configurator {
 	informerFactory := informers.NewSharedInformerFactory(client, 0)
 	snapshot := internalcache.NewEmptySnapshot()
-	recorderFactory := profile.NewRecorderFactory(events.NewBroadcaster(&events.EventSinkImpl{Interface: client.EventsV1beta1().Events("")}))
+	recorderFactory := profile.NewRecorderFactory(events.NewBroadcaster(&events.EventSinkImpl{Interface: client.EventsV1()}))
 	return &Configurator{
 		client:                   client,
 		informerFactory:          informerFactory,
-		podInformer:              informerFactory.Core().V1().Pods(),
-		disablePreemption:        disablePodPreemption,
 		percentageOfNodesToScore: schedulerapi.DefaultPercentageOfNodesToScore,
-		bindTimeoutSeconds:       bindTimeoutSeconds,
 		podInitialBackoffSeconds: podInitialBackoffDurationSeconds,
 		podMaxBackoffSeconds:     podMaxBackoffDurationSeconds,
 		StopEverything:           stopCh,
-		enableNonPreempting:      utilfeature.DefaultFeatureGate.Enabled(kubefeatures.NonPreemptingPriority),
 		registry:                 registry,
 		profiles: []schedulerapi.KubeSchedulerProfile{
 			{SchedulerName: testSchedulerName},
@@ -539,10 +663,10 @@ func (f *fakeExtender) IsIgnorable() bool {
 }
 
 func (f *fakeExtender) ProcessPreemption(
-	pod *v1.Pod,
-	nodeToVictims map[*v1.Node]*extenderv1.Victims,
-	nodeInfos framework.NodeInfoLister,
-) (map[*v1.Node]*extenderv1.Victims, error) {
+	_ *v1.Pod,
+	_ map[string]*extenderv1.Victims,
+	_ framework.NodeInfoLister,
+) (map[string]*extenderv1.Victims, error) {
 	return nil, nil
 }
 
@@ -555,8 +679,8 @@ func (f *fakeExtender) Filter(pod *v1.Pod, nodes []*v1.Node) (filteredNodes []*v
 }
 
 func (f *fakeExtender) Prioritize(
-	pod *v1.Pod,
-	nodes []*v1.Node,
+	_ *v1.Pod,
+	_ []*v1.Node,
 ) (hostPriorities *extenderv1.HostPriorityList, weight int64, err error) {
 	return nil, 0, nil
 }

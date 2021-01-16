@@ -29,8 +29,8 @@ import (
 	"syscall"
 	"testing"
 
-	"k8s.io/klog"
-	"k8s.io/utils/mount"
+	"k8s.io/klog/v2"
+	"k8s.io/mount-utils"
 )
 
 func TestSafeMakeDir(t *testing.T) {

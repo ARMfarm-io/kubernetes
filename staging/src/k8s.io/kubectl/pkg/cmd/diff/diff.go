@@ -22,6 +22,8 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
@@ -35,7 +37,7 @@ import (
 	"k8s.io/cli-runtime/pkg/resource"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"k8s.io/kubectl/pkg/cmd/apply"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/scheme"
@@ -55,7 +57,10 @@ var (
 		Output is always YAML.
 
 		KUBECTL_EXTERNAL_DIFF environment variable can be used to select your own
-		diff command. By default, the "diff" command available in your path will be
+		diff command. Users can use external commands with params too, example:
+		KUBECTL_EXTERNAL_DIFF="colordiff -N -u"
+
+		By default, the "diff" command available in your path will be
 		run with "-u" (unified diff) and "-N" (treat absent files as empty) options.
 
 		Exit status:
@@ -95,6 +100,7 @@ type DiffOptions struct {
 	FieldManager    string
 	ForceConflicts  bool
 
+	Selector         string
 	OpenAPISchema    openapi.Resources
 	DiscoveryClient  discovery.DiscoveryInterface
 	DynamicClient    dynamic.Interface
@@ -148,8 +154,10 @@ func NewCmdDiff(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.C
 	}
 
 	usage := "contains the configuration to diff"
+	cmd.Flags().StringVarP(&options.Selector, "selector", "l", options.Selector, "Selector (label query) to filter on, supports '=', '==', and '!='.(e.g. -l key1=value1,key2=value2)")
 	cmdutil.AddFilenameOptionFlags(cmd, &options.FilenameOptions, usage)
 	cmdutil.AddServerSideApplyFlags(cmd)
+	cmdutil.AddFieldManagerFlagVar(cmd, &options.FieldManager, apply.FieldManagerClientSideApply)
 
 	return cmd
 }
@@ -165,7 +173,18 @@ type DiffProgram struct {
 func (d *DiffProgram) getCommand(args ...string) (string, exec.Cmd) {
 	diff := ""
 	if envDiff := os.Getenv("KUBECTL_EXTERNAL_DIFF"); envDiff != "" {
-		diff = envDiff
+		diffCommand := strings.Split(envDiff, " ")
+		diff = diffCommand[0]
+
+		if len(diffCommand) > 1 {
+			// Regex accepts: Alphanumeric (case-insensitive) and dash
+			isValidChar := regexp.MustCompile(`^[a-zA-Z0-9-]+$`).MatchString
+			for i := 1; i < len(diffCommand); i++ {
+				if isValidChar(diffCommand[i]) {
+					args = append(args, diffCommand[i])
+				}
+			}
+		}
 	} else {
 		diff = "diff"
 		args = append([]string{"-u", "-N"}, args...)
@@ -312,7 +331,9 @@ func (obj InfoObject) Live() runtime.Object {
 // Returns the "merged" object, as it would look like if applied or
 // created.
 func (obj InfoObject) Merged() (runtime.Object, error) {
-	helper := resource.NewHelper(obj.Info.Client, obj.Info.Mapping).DryRun(true)
+	helper := resource.NewHelper(obj.Info.Client, obj.Info.Mapping).
+		DryRun(true).
+		WithFieldManager(obj.FieldManager)
 	if obj.ServerSideApply {
 		data, err := runtime.Encode(unstructured.UnstructuredJSONScheme, obj.LocalObj)
 		if err != nil {
@@ -364,7 +385,6 @@ func (obj InfoObject) Merged() (runtime.Object, error) {
 		Helper:          helper,
 		Overwrite:       true,
 		BackOff:         clockwork.NewRealClock(),
-		ServerDryRun:    true,
 		OpenapiSchema:   obj.OpenAPI,
 		ResourceVersion: resourceVersion,
 	}
@@ -444,7 +464,7 @@ func (o *DiffOptions) Complete(f cmdutil.Factory, cmd *cobra.Command) error {
 	}
 
 	o.ServerSideApply = cmdutil.GetServerSideApplyFlag(cmd)
-	o.FieldManager = cmdutil.GetFieldManagerFlag(cmd)
+	o.FieldManager = apply.GetApplyFieldManagerFlag(cmd, o.ServerSideApply)
 	o.ForceConflicts = cmdutil.GetForceConflictsFlag(cmd)
 	if o.ForceConflicts && !o.ServerSideApply {
 		return fmt.Errorf("--force-conflicts only works with --server-side")
@@ -494,6 +514,7 @@ func (o *DiffOptions) Run() error {
 		Unstructured().
 		NamespaceParam(o.CmdNamespace).DefaultNamespace().
 		FilenameParam(o.EnforceNamespace, &o.FilenameOptions).
+		LabelSelectorParam(o.Selector).
 		Flatten().
 		Do()
 	if err := r.Err(); err != nil {
@@ -543,6 +564,9 @@ func (o *DiffOptions) Run() error {
 				break
 			}
 		}
+
+		apply.WarnIfDeleting(info.Object, o.Diff.ErrOut)
+
 		return err
 	})
 	if err != nil {

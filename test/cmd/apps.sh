@@ -42,6 +42,9 @@ run_daemonset_tests() {
   kube::test::get_object_assert 'daemonsets bind' "{{${generation_field:?}}}" '3'
   kubectl set resources daemonsets/bind "${kube_flags[@]:?}" --limits=cpu=200m,memory=512Mi
   kube::test::get_object_assert 'daemonsets bind' "{{${generation_field:?}}}" '4'
+  # pod has field for kubectl set field manager
+  output_message=$(kubectl get daemonsets bind -o=jsonpath='{.metadata.managedFields[*].manager}' "${kube_flags[@]:?}" 2>&1)
+  kube::test::if_has_string "${output_message}" 'kubectl-set'
 
   # Rollout restart should change generation
   kubectl rollout restart daemonset/bind "${kube_flags[@]:?}"
@@ -134,7 +137,7 @@ run_kubectl_apply_deployments_tests() {
 
   # cleanup
   # need to explicitly remove replicasets and pods because we changed the deployment selector and orphaned things
-  kubectl delete deployments,rs,pods --all --cascade=false --grace-period=0
+  kubectl delete deployments,rs,pods --all --cascade=orphan --grace-period=0
   # Post-Condition: no Deployments, ReplicaSets, Pods exist
   kube::test::wait_object_assert deployments "{{range.items}}{{${id_field:?}}}:{{end}}" ''
   kube::test::wait_object_assert replicasets "{{range.items}}{{${id_field:?}}}:{{end}}" ''
@@ -194,7 +197,7 @@ run_deployment_tests() {
   kubectl delete deployment test-nginx-extensions "${kube_flags[@]:?}"
 
   # Test kubectl create deployment
-  kubectl create deployment test-nginx-apps --image=k8s.gcr.io/nginx:test-cmd --generator=deployment-basic/apps.v1
+  kubectl create deployment test-nginx-apps --image=k8s.gcr.io/nginx:test-cmd
   # Post-Condition: Deployment "nginx" is created.
   kube::test::get_object_assert 'deploy test-nginx-apps' "{{${container_name_field:?}}}" 'nginx'
   # and new generator was used, iow. new defaults are applied
@@ -243,10 +246,11 @@ run_deployment_tests() {
   # Wait for rs to come up.
   kube::test::wait_object_assert rs "{{range.items}}{{${rs_replicas_field:?}}}{{end}}" '3'
   # Deleting the deployment should delete the rs.
-  kubectl delete deployment nginx-deployment "${kube_flags[@]:?}"
+  # using empty value in cascade flag to make sure the backward compatibility.
+  kubectl delete deployment nginx-deployment "${kube_flags[@]:?}" --cascade
   kube::test::wait_object_assert rs "{{range.items}}{{${id_field:?}}}:{{end}}" ''
 
-  ## Test that rs is not deleted when deployment is deleted with cascade set to false.
+  ## Test that rs is not deleted when deployment is deleted with cascading strategy set to orphan.
   # Pre-condition: no deployment and rs exist
   kube::test::get_object_assert deployment "{{range.items}}{{${id_field:?}}}:{{end}}" ''
   kube::test::get_object_assert rs "{{range.items}}{{${id_field:?}}}:{{end}}" ''
@@ -254,8 +258,8 @@ run_deployment_tests() {
   kubectl create deployment nginx-deployment --image=k8s.gcr.io/nginx:test-cmd
   # Wait for rs to come up.
   kube::test::wait_object_assert rs "{{range.items}}{{${rs_replicas_field:?}}}{{end}}" '1'
-  # Delete the deployment with cascade set to false.
-  kubectl delete deployment nginx-deployment "${kube_flags[@]:?}" --cascade=false
+  # Delete the deployment with cascading strategy set to orphan.
+  kubectl delete deployment nginx-deployment "${kube_flags[@]:?}" --cascade=orphan
   # Wait for the deployment to be deleted and then verify that rs is not
   # deleted.
   kube::test::wait_object_assert deployment "{{range.items}}{{${id_field:?}}}:{{end}}" ''
@@ -335,6 +339,10 @@ run_deployment_tests() {
   newrs="$(kubectl describe deployment nginx | grep NewReplicaSet | awk '{print $2}')"
   rs="$(kubectl get rs "${newrs}" -o yaml)"
   kube::test::if_has_string "${rs}" "deployment.kubernetes.io/revision: \"6\""
+  # Deployment has field for kubectl rollout field manager
+  output_message=$(kubectl get deployment nginx -o=jsonpath='{.metadata.managedFields[*].manager}' "${kube_flags[@]:?}" 2>&1)
+  kube::test::if_has_string "${output_message}" 'kubectl-rollout'
+  # Create second deployment
   ${SED} "s/name: nginx$/name: nginx2/" hack/testdata/deployment-revision1.yaml | kubectl create -f - "${kube_flags[@]:?}"
   # Deletion of both deployments should not be blocked
   kubectl delete deployment nginx2 "${kube_flags[@]:?}"
@@ -538,7 +546,7 @@ run_rs_tests() {
   # Post-condition: no pods from frontend replica set
   kube::test::wait_object_assert 'pods -l "tier=frontend"' "{{range.items}}{{${id_field:?}}}:{{end}}" ''
 
-  ### Create and then delete a replica set with cascade=false, make sure it doesn't delete pods.
+  ### Create and then delete a replica set with cascading strategy set to orphan, make sure it doesn't delete pods.
   # Pre-condition: no replica set exists
   kube::test::get_object_assert rs "{{range.items}}{{${id_field:?}}}:{{end}}" ''
   # Command
@@ -546,7 +554,7 @@ run_rs_tests() {
   # wait for all 3 pods to be set up
   kube::test::wait_object_assert 'pods -l "tier=frontend"' "{{range.items}}{{${pod_container_name_field:?}}}:{{end}}" 'php-redis:php-redis:php-redis:'
   kube::log::status "Deleting rs"
-  kubectl delete rs frontend "${kube_flags[@]:?}" --cascade=false
+  kubectl delete rs frontend "${kube_flags[@]:?}" --cascade=orphan
   # Wait for the rs to be deleted.
   kube::test::wait_object_assert rs "{{range.items}}{{${id_field:?}}}:{{end}}" ''
   # Post-condition: All 3 pods still remain from frontend replica set
@@ -653,6 +661,10 @@ run_rs_tests() {
   kubectl set serviceaccount rs/frontend "${kube_flags[@]:?}" serviceaccount1
   kube::test::get_object_assert 'rs frontend' "{{${generation_field:?}}}" '5'
 
+  # RS has field for kubectl set field manager
+  output_message=$(kubectl get rs frontend -o=jsonpath='{.metadata.managedFields[*].manager}' "${kube_flags[@]:?}" 2>&1)
+  kube::test::if_has_string "${output_message}" 'kubectl-set'
+
   ### Delete replica set with id
   # Pre-condition: frontend replica set exists
   kube::test::get_object_assert rs "{{range.items}}{{${id_field:?}}}:{{end}}" 'frontend:'
@@ -692,6 +704,10 @@ run_rs_tests() {
     # autoscale 2~3 pods, no CPU utilization specified, replica set specified by name
     kubectl autoscale rs frontend "${kube_flags[@]:?}" --min=2 --max=3
     kube::test::get_object_assert 'hpa frontend' "{{${hpa_min_field:?}}} {{${hpa_max_field:?}}} {{${hpa_cpu_field:?}}}" '2 3 80'
+    # HorizontalPodAutoscaler has field for kubectl autoscale field manager
+    output_message=$(kubectl get hpa frontend -o=jsonpath='{.metadata.managedFields[*].manager}' "${kube_flags[@]:?}" 2>&1)
+    kube::test::if_has_string "${output_message}" 'kubectl-autoscale'
+    # Clean up
     kubectl delete hpa frontend "${kube_flags[@]:?}"
     # autoscale without specifying --max should fail
     ! kubectl autoscale rs frontend "${kube_flags[@]:?}" || exit 1

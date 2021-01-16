@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	apiextensionshelpers "k8s.io/apiextensions-apiserver/pkg/apihelpers"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -73,8 +73,8 @@ func (ec *EstablishingController) Run(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 	defer ec.queue.ShutDown()
 
-	klog.Infof("Starting EstablishingController")
-	defer klog.Infof("Shutting down EstablishingController")
+	klog.Info("Starting EstablishingController")
+	defer klog.Info("Shutting down EstablishingController")
 
 	if !cache.WaitForCacheSync(stopCh, ec.crdSynced) {
 		return

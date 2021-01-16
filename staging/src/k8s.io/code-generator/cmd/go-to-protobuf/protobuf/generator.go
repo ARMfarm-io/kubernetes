@@ -25,7 +25,7 @@ import (
 	"strconv"
 	"strings"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/gengo/generator"
 	"k8s.io/gengo/namer"
@@ -740,7 +740,7 @@ func formatProtoFile(source []byte) ([]byte, error) {
 func assembleProtoFile(w io.Writer, f *generator.File) {
 	w.Write(f.Header)
 
-	fmt.Fprint(w, "syntax = 'proto2';\n\n")
+	fmt.Fprint(w, "syntax = \"proto2\";\n\n")
 
 	if len(f.PackageName) > 0 {
 		fmt.Fprintf(w, "package %s;\n\n", f.PackageName)

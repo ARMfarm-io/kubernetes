@@ -22,7 +22,7 @@ import (
 	"reflect"
 	"time"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -263,8 +263,8 @@ func (c *CRDFinalizer) Run(workers int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 	defer c.queue.ShutDown()
 
-	klog.Infof("Starting CRDFinalizer")
-	defer klog.Infof("Shutting down CRDFinalizer")
+	klog.Info("Starting CRDFinalizer")
+	defer klog.Info("Shutting down CRDFinalizer")
 
 	if !cache.WaitForCacheSync(stopCh, c.crdSynced) {
 		return

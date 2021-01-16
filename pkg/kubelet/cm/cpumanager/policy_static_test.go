@@ -419,7 +419,7 @@ func TestStaticPolicyAdd(t *testing.T) {
 		{
 			// Only 7 CPUs are available.
 			// Pod requests 76 cores.
-			// Error is expect since available CPUs are less than the request.
+			// Error is expected since available CPUs are less than the request.
 			description: "GuPodMultipleCores, topoQuadSocketFourWayHT, NoAlloc",
 			topo:        topoQuadSocketFourWayHT,
 			stAssignments: state.ContainerCPUAssignments{
@@ -639,7 +639,7 @@ func TestTopologyAwareAllocateCPUs(t *testing.T) {
 			continue
 		}
 
-		cset, err := policy.allocateCPUs(st, tc.numRequested, tc.socketMask)
+		cset, err := policy.allocateCPUs(st, tc.numRequested, tc.socketMask, cpuset.NewCPUSet())
 		if err != nil {
 			t.Errorf("StaticPolicy allocateCPUs() error (%v). expected CPUSet %v not error %v",
 				tc.description, tc.expCSet, err)

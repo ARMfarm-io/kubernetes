@@ -21,7 +21,7 @@ import (
 	"errors"
 	"net/http"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apiserver/pkg/audit"
@@ -44,7 +44,7 @@ const (
 // WithAuthorizationCheck passes all authorized requests on to handler, and returns a forbidden error otherwise.
 func WithAuthorization(handler http.Handler, a authorizer.Authorizer, s runtime.NegotiatedSerializer) http.Handler {
 	if a == nil {
-		klog.Warningf("Authorization is disabled")
+		klog.Warning("Authorization is disabled")
 		return handler
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {

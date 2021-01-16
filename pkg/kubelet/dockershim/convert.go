@@ -1,3 +1,5 @@
+// +build !dockerless
+
 /*
 Copyright 2016 The Kubernetes Authors.
 
@@ -164,7 +166,7 @@ func containerToRuntimeAPISandbox(c *dockertypes.Container) (*runtimeapi.PodSand
 	}, nil
 }
 
-func checkpointToRuntimeAPISandbox(id string, checkpoint DockershimCheckpoint) *runtimeapi.PodSandbox {
+func checkpointToRuntimeAPISandbox(id string, checkpoint ContainerCheckpoint) *runtimeapi.PodSandbox {
 	state := runtimeapi.PodSandboxState_SANDBOX_NOTREADY
 	_, name, namespace, _, _ := checkpoint.GetData()
 	return &runtimeapi.PodSandbox{

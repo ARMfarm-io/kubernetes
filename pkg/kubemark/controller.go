@@ -33,7 +33,7 @@ import (
 	listersv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -351,7 +351,8 @@ func (kubemarkController *KubemarkController) runNodeCreation(stop <-chan struct
 }
 
 func (kubemarkCluster *kubemarkCluster) getHollowNodeName() (string, error) {
-	nodes, err := kubemarkCluster.nodeLister.List(labels.Everything())
+	selector, _ := labels.Parse(nodeGroupLabel)
+	nodes, err := kubemarkCluster.nodeLister.List(selector)
 	if err != nil {
 		return "", err
 	}

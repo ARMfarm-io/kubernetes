@@ -31,7 +31,7 @@ import (
 	"time"
 
 	apps "k8s.io/api/apps/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,7 +48,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	utiltesting "k8s.io/client-go/util/testing"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/controller"
 	. "k8s.io/kubernetes/pkg/controller/testutil"
 	"k8s.io/kubernetes/pkg/securitycontext"
@@ -599,6 +599,7 @@ func TestWatchControllers(t *testing.T) {
 		BurstReplicas,
 	)
 	informers.Start(stopCh)
+	informers.WaitForCacheSync(stopCh)
 
 	var testRSSpec apps.ReplicaSet
 	received := make(chan string)
@@ -1151,6 +1152,7 @@ func TestExpectationsOnRecreate(t *testing.T) {
 		100,
 	)
 	f.Start(stopCh)
+	f.WaitForCacheSync(stopCh)
 	fakePodControl := controller.FakePodControl{}
 	manager.podControl = &fakePodControl
 

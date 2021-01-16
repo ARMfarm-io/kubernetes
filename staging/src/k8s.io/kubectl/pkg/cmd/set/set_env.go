@@ -25,7 +25,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -38,6 +38,7 @@ import (
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/polymorphichelpers"
 	"k8s.io/kubectl/pkg/scheme"
+	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/templates"
 )
 
@@ -46,7 +47,7 @@ var (
 	envResources       = `
   	pod (po), replicationcontroller (rc), deployment (deploy), daemonset (ds), job, replicaset (rs)`
 
-	envLong = templates.LongDesc(`
+	envLong = templates.LongDesc(i18n.T(`
 		Update environment variables on a pod template.
 
 		List environment variable definitions in one or more pods, pod templates.
@@ -59,7 +60,7 @@ var (
 		syntax.
 
 		Possible resources include (case insensitive):
-		` + envResources)
+		`) + envResources)
 
 	envExample = templates.Examples(`
           # Update deployment 'registry' with a new environment variable
@@ -113,6 +114,7 @@ type EnvOptions struct {
 	From              string
 	Prefix            string
 	Keys              []string
+	fieldManager      string
 
 	PrintObj printers.ResourcePrinterFunc
 
@@ -149,7 +151,7 @@ func NewCmdEnv(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Co
 	cmd := &cobra.Command{
 		Use:                   "env RESOURCE/NAME KEY_1=VAL_1 ... KEY_N=VAL_N",
 		DisableFlagsInUseLine: true,
-		Short:                 "Update environment variables on a pod template",
+		Short:                 i18n.T("Update environment variables on a pod template"),
 		Long:                  envLong,
 		Example:               envExample,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -171,6 +173,7 @@ func NewCmdEnv(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Co
 	cmd.Flags().BoolVar(&o.Local, "local", o.Local, "If true, set env will NOT contact api-server but run locally.")
 	cmd.Flags().BoolVar(&o.All, "all", o.All, "If true, select all resources in the namespace of the specified resource types")
 	cmd.Flags().BoolVar(&o.Overwrite, "overwrite", o.Overwrite, "If true, allow environment to be overwritten, otherwise reject updates that overwrite existing environment.")
+	cmdutil.AddFieldManagerFlagVar(cmd, &o.fieldManager, "kubectl-set")
 
 	o.PrintFlags.AddFlags(cmd)
 
@@ -512,6 +515,7 @@ func (o *EnvOptions) RunEnv() error {
 		actual, err := resource.
 			NewHelper(info.Client, info.Mapping).
 			DryRun(o.dryRunStrategy == cmdutil.DryRunServer).
+			WithFieldManager(o.fieldManager).
 			Patch(info.Namespace, info.Name, types.StrategicMergePatchType, patch.Patch, nil)
 		if err != nil {
 			allErrs = append(allErrs, fmt.Errorf("failed to patch env update to pod template: %v", err))

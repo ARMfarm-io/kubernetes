@@ -20,7 +20,7 @@ import (
 	"reflect"
 	"testing"
 
-	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 func TestDefaultNormalizeScore(t *testing.T) {
@@ -53,6 +53,11 @@ func TestDefaultNormalizeScore(t *testing.T) {
 		},
 		{
 			scores:         []int64{1000, 1, 1, 1},
+			expectedScores: []int64{100, 0, 0, 0},
+		},
+		{
+			reverse:        true,
+			scores:         []int64{0, 1, 1, 1},
 			expectedScores: []int64{100, 0, 0, 0},
 		},
 	}

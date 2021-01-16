@@ -24,7 +24,7 @@ import (
 	"regexp"
 	"testing"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -186,7 +186,7 @@ func TestNewCmdTokenGenerate(t *testing.T) {
 	var buf bytes.Buffer
 	args := []string{}
 
-	cmd := NewCmdTokenGenerate(&buf)
+	cmd := newCmdTokenGenerate(&buf)
 	cmd.SetArgs(args)
 
 	if err := cmd.Execute(); err != nil {
@@ -242,8 +242,8 @@ func TestNewCmdToken(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// the command is created for each test so that the kubeConfigFile
-			// variable in NewCmdToken() is reset.
-			cmd := NewCmdToken(&buf, &bufErr)
+			// variable in newCmdToken() is reset.
+			cmd := newCmdToken(&buf, &bufErr)
 			if _, err = f.WriteString(tc.configToWrite); err != nil {
 				t.Errorf("Unable to write test file %q: %v", fullPath, err)
 			}
@@ -255,7 +255,7 @@ func TestNewCmdToken(t *testing.T) {
 			cmd.SetArgs(tc.args)
 			err := cmd.Execute()
 			if (err != nil) != tc.expectedError {
-				t.Errorf("Test case %q: NewCmdToken expected error: %v, saw: %v", tc.name, tc.expectedError, (err != nil))
+				t.Errorf("Test case %q: newCmdToken expected error: %v, saw: %v", tc.name, tc.expectedError, (err != nil))
 			}
 			// restore the environment variable.
 			os.Setenv(clientcmd.RecommendedConfigPathEnvVar, storedEnv)
@@ -420,7 +420,7 @@ abcdef.1234567890123456   <forever>   <never>   signing,authentication   valid b
 			usages:       []string{"signing", "authentication"},
 			extraGroups:  []string{"system:bootstrappers:kubeadm:default-node-token"},
 			outputFormat: "jsonpath={.token} {.groups}",
-			expected:     "abcdef.1234567890123456 [system:bootstrappers:kubeadm:default-node-token]",
+			expected:     "abcdef.1234567890123456 [\"system:bootstrappers:kubeadm:default-node-token\"]",
 		},
 	}
 	for _, tc := range testCases {

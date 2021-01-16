@@ -1,3 +1,5 @@
+// +build !dockerless
+
 /*
 Copyright 2016 The Kubernetes Authors.
 
@@ -123,9 +125,9 @@ func TestModifyContainerConfig(t *testing.T) {
 		dockerCfg := &dockercontainer.Config{}
 		err := modifyContainerConfig(tc.sc, dockerCfg)
 		if tc.isErr {
-			assert.NotNil(t, err)
+			assert.Error(t, err)
 		} else {
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 			assert.Equal(t, tc.expected, dockerCfg, "[Test case %q]", tc.name)
 		}
 	}
